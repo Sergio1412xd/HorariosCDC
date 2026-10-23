@@ -150,6 +150,97 @@ def horas_pagables_turno(turno: dict):
         yield h
 
 
+def recalcular_desde_horario_editado(resultado: dict, empleados: list, fecha_lunes: date = None,
+                                      db_path: str = "callcenter.db") -> dict:
+    """
+    Recalcula 'cobertura[dia][hora].programados', 'horas_semana' y 'alertas' de un
+    'resultado' (el mismo dict que devuelve generar_horario_semana) a partir de lo que HAYA
+    en resultado['horario'] en este momento -- sin volver a correr el algoritmo de
+    asignación.
+
+    Esto es lo que permite la edición manual: el usuario edita/añade/borra turnos
+    directamente en el horario ya generado (ver endpoint /api/horario/recalcular en
+    main.py), y esta función reconstruye el resto de los números (cobertura real, horas
+    por semana de cada asesor, alertas) para que el costo, el nivel de servicio estimado y
+    el chequeo de cumplimiento normativo reflejen exactamente lo que quedó editado, en vez
+    de lo que el algoritmo había propuesto originalmente.
+
+    Las 'requeridos' (y 'calls'/'aht_seconds') por hora NO se tocan -- esos salen de la
+    demanda (llamadas/Erlang C), no del horario, así que se conservan tal cual estaban.
+
+    Si se pasa 'fecha_lunes', además sincroniza 'historial_turnos' con el horario ya
+    editado (para que la rotación justa de semanas futuras cuente lo que el usuario
+    realmente dejó, no el borrador original del algoritmo).
+    """
+    import copy
+    resultado = copy.deepcopy(resultado)
+    cobertura = resultado["cobertura"]
+    for dia_cob in cobertura.values():
+        for info_hora in dia_cob.values():
+            info_hora["programados"] = 0
+
+    empleados_por_nombre = {e["nombre"]: e for e in empleados}
+    horas_semana = {e["nombre"]: 0.0 for e in empleados}
+    horario = resultado["horario"]
+
+    for nombre, dias in horario.items():
+        if nombre not in horas_semana:
+            horas_semana[nombre] = 0.0
+        for dia, info in dias.items():
+            turnos = info.get("turnos") if isinstance(info, dict) else None
+            if not turnos:
+                continue
+            turnos_validados = []
+            for turno in turnos:
+                inicio, fin = turno.get("inicio"), turno.get("fin")
+                if inicio is None or fin is None or fin <= inicio:
+                    continue  # turno editado a mano que quedó inválido -- se ignora, no se cae el cálculo
+                turnos_validados.append(turno)
+                almuerzo_horas = turno.get("almuerzo_horas", 0) or 0
+                horas_semana[nombre] += (fin - inicio) - almuerzo_horas
+                if dia in cobertura:
+                    for h in horas_pagables_turno(turno):
+                        if h in cobertura[dia]:
+                            cobertura[dia][h]["programados"] += 1
+            info["turnos"] = turnos_validados
+
+    resultado["horas_semana"] = horas_semana
+
+    # ---- Alertas (igual que al final de generar_horario_semana, pero sobre los números
+    # ya editados): horas sin cubrir y asesores que quedaron bajo su mínimo semanal. ----
+    alertas = []
+    for dia, horas in cobertura.items():
+        for h in sorted(horas):
+            req, prog = horas[h]["requeridos"], horas[h]["programados"]
+            if prog < req:
+                alertas.append(f"{dia} {h}:00 -- faltan {req - prog} agente(s) (requeridos {req}, programados {prog})")
+    for nombre, horas_e in horas_semana.items():
+        e = empleados_por_nombre.get(nombre)
+        if e and horas_e < e["horas_min_semana"]:
+            alertas.append(
+                f"{nombre}: quedó en {horas_e:.0f}h esta semana, por debajo de su mínimo "
+                f"contractual de {e['horas_min_semana']:.0f}h (edición manual)"
+            )
+    resultado["alertas"] = alertas
+
+    if fecha_lunes is not None:
+        fechas_semana = {DIAS_SEMANA[i]: fecha_lunes + timedelta(days=i) for i in range(7)}
+        entradas_historial = []
+        for e in empleados:
+            nombre = e["nombre"]
+            for dia, fecha_dia in fechas_semana.items():
+                info = horario.get(nombre, {}).get(dia, {})
+                if info.get("turnos"):
+                    hi = min(t["inicio"] for t in info["turnos"])
+                    hf = max(t["fin"] for t in info["turnos"])
+                    entradas_historial.append((e["id"], fecha_dia.isoformat(), dia, hi, hf))
+                else:
+                    entradas_historial.append((e["id"], fecha_dia.isoformat(), dia, None, None))
+        guardar_turnos_historial_batch(entradas_historial, db_path=db_path)
+
+    return resultado
+
+
 def generar_horario_semana(fecha_lunes: date, db_path: str = "callcenter.db",
                             target_service_level: float = 0.95, shrinkage: float = 0.10,
                             fraccion_equidad: float = 0.40, factor_proyeccion: float = 1.0,
@@ -412,11 +503,28 @@ def generar_horario_semana(fecha_lunes: date, db_path: str = "callcenter.db",
         candidatos = candidatos_por_dia[dia]
         asignados_hoy = asignados_por_dia[dia]
         plantillas_hoy = plantillas_por_dia.get(dia, [])
-        max_iter = len(candidatos) + 8
+        # +len(cobertura[dia]) porque, además de una iteración por turno asignado, ahora
+        # también puede gastarse una iteración por cada hora que resulte imposible de cubrir
+        # (ver 'horas_sin_candidato' abajo) sin que eso cuente como una asignación real.
+        max_iter = len(candidatos) + len(cobertura[dia]) + 8
+
+        # Horas de este día para las que YA se intentó cubrir en esta pasada y no hubo ningún
+        # candidato/plantilla viable (ej. la hora de apertura, que casi nadie alcanza por
+        # disponibilidad). Antes, cuando esto pasaba con la hora MÁS urgente, el ciclo entero
+        # se cortaba con 'break' y abandonaba TODAS las demás horas con déficit de ese día,
+        # aunque sí hubiera gente/plantillas disponibles para cubrirlas -- eso es lo que hacía
+        # que autorizar horas extra o ampliar disponibilidad no sirviera de nada: bastaba con
+        # que UNA sola hora difícil no tuviera candidato para que el resto del día (incluyendo
+        # horas fáciles de cubrir) se quedara sin tocar en esta pasada. Ahora, en vez de
+        # rendirse con todo el día, se marca esa hora puntual como no cubrible EN ESTA PASADA
+        # y se sigue intentando con las demás horas con déficit.
+        horas_sin_candidato = set()
 
         for _ in range(max_iter):
             deficits = {}
             for h, c in cobertura[dia].items():
+                if h in horas_sin_candidato:
+                    continue
                 techo = max(1, round(c["requeridos"] * fraccion_objetivo)) if c["requeridos"] > 0 else 0
                 d = techo - c["programados"]
                 if d > 0:
@@ -509,7 +617,11 @@ def generar_horario_semana(fecha_lunes: date, db_path: str = "callcenter.db",
                         mejor_score, mejor = score, (e, mejor_inicio, mejor_inicio + duracion, None)
 
             if mejor is None:
-                break
+                # Nadie pudo cubrir precisamente la hora más urgente -- se marca como no
+                # cubrible en esta pasada (no todo el día) y se sigue con las demás horas
+                # que sí tengan déficit, en vez de abandonar el día entero.
+                horas_sin_candidato.add(hora_pico)
+                continue
 
             e, inicio, fin, plantilla_usada = mejor
             nombre = e["nombre"]
@@ -949,11 +1061,21 @@ def generar_horario_semana(fecha_lunes: date, db_path: str = "callcenter.db",
     # la semana completa), se revierte TODO -- nunca se entrega algo peor que sin el pase. ----
     sl_antes = estimar_nivel_servicio_real({"cobertura": snapshot_cobertura})
     sl_despues = estimar_nivel_servicio_real({"cobertura": cobertura})
+    # 'sl_estimado_pct' puede venir en None cuando ese día/semana no tuvo NINGUNA llamada
+    # registrada (ej. un día sin histórico) -- sin dato no hay cómo decir que "empeoró", así
+    # que esos casos simplemente no cuentan como un empeoramiento (en vez de reventar la
+    # generación completa comparando None con un número).
     peor_dia_empeoro = any(
-        sl_despues["por_dia"][d]["sl_estimado_pct"] < sl_antes["por_dia"][d]["sl_estimado_pct"] - 2
+        sl_despues["por_dia"][d]["sl_estimado_pct"] is not None
+        and sl_antes["por_dia"][d]["sl_estimado_pct"] is not None
+        and sl_despues["por_dia"][d]["sl_estimado_pct"] < sl_antes["por_dia"][d]["sl_estimado_pct"] - 2
         for d in DIAS_SEMANA
     )
-    semana_empeoro = sl_despues["sl_estimado_semana_pct"] < sl_antes["sl_estimado_semana_pct"]
+    semana_empeoro = (
+        sl_despues["sl_estimado_semana_pct"] is not None
+        and sl_antes["sl_estimado_semana_pct"] is not None
+        and sl_despues["sl_estimado_semana_pct"] < sl_antes["sl_estimado_semana_pct"]
+    )
     if peor_dia_empeoro or semana_empeoro:
         for t, contenido_original in snapshot_turnos:
             t.clear()

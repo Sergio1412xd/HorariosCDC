@@ -163,7 +163,7 @@ async function cargarEmpleados() {
   const tbody = document.getElementById("tabla-empleados");
 
   if (empleados.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7">
+    tbody.innerHTML = `<tr><td colspan="8">
       <div class="empty-state">
         Todavía no hay ningún asesor cargado en esta base de datos.<br>
         <a onclick="mostrarVista('importar')">Ir a Importar Datos →</a>
@@ -173,6 +173,10 @@ async function cargarEmpleados() {
   }
 
   tbody.innerHTML = "";
+  // Al recargar la lista, se olvida cualquier selección anterior para no arrastrar ids
+  // que ya no correspondan a lo que se ve en pantalla.
+  empleadosSeleccionados.clear();
+  actualizarBarraSeleccionEmpleados();
 
   empleados.forEach(emp => {
     const val = validacionCache[emp.nombre];
@@ -189,6 +193,7 @@ async function cargarEmpleados() {
       ? `<span class="badge badge-ok" title="Autorizado">+${emp.max_horas_extra_semana}h/sem</span>`
       : `<span style="color:var(--text-muted); font-size:11.5px;">No</span>`;
     tr.innerHTML = `
+      <td><input type="checkbox" class="chk-empleado" data-id="${emp.id}" onchange="toggleSeleccionEmpleado(${emp.id}, this.checked)"></td>
       <td>${emp.nombre}</td>
       <td>${cedulaHtml}</td>
       <td>${emp.horas_min_dia}h – ${emp.horas_max_dia}h</td>
@@ -1065,12 +1070,18 @@ function renderHorario(data) {
     no_disponible: "No disp.", sin_informacion: "Sin info", libre_no_requerido: "Libre",
     descanso_asignado: "Descanso",
     tope_semanal_alcanzado: "Tope sem.",
+    editado_manual: "Libre (manual)",
   };
 
   for (const [nombre, dias] of Object.entries(data.horario)) {
     html += `<tr><td>${nombre}</td>`;
     DIAS.forEach(dia => {
       const info = dias[dia];
+      // El atributo va entre comillas simples porque JSON.stringify() devuelve comillas
+      // dobles -- si el atributo también usara comillas dobles, cualquier nombre lo cortaba
+      // a la mitad y el clic quedaba roto (aunque el hover por CSS siguiera viéndose bien).
+      const nombreJs = JSON.stringify(nombre).replace(/'/g, "&#39;");
+      const clickAttr = `onclick='abrirModalEditarTurno(${nombreJs}, ${JSON.stringify(dia)})' title="Clic para editar manualmente este turno"`;
       if (info.tipo === "turno") {
         const texto = info.turnos.map(t => {
           let base = `${String(t.inicio).padStart(2,'0')}-${String(t.fin).padStart(2,'0')}h${t.excepcion ? '*' : ''}`;
@@ -1080,11 +1091,11 @@ function renderHorario(data) {
           }
           return base;
         }).join(" + ");
-        html += `<td class="turno-badge">${texto}</td>`;
+        html += `<td class="turno-badge turno-editable" ${clickAttr}>${texto}</td>`;
       } else if (info.motivo && info.motivo.startsWith("permiso:")) {
         html += `<td class="libre-badge">${info.motivo.replace('permiso:', '')}</td>`;
       } else {
-        html += `<td class="libre-badge">${motivos[info.motivo] || info.motivo}</td>`;
+        html += `<td class="libre-badge turno-editable" ${clickAttr}>${motivos[info.motivo] || info.motivo}</td>`;
       }
     });
     const horas = data.horas_semana[nombre] || 0;
@@ -1102,6 +1113,92 @@ function renderHorario(data) {
     `<button class="chip-btn" id="tab-dia-${i}" onclick="mostrarCoberturaDia('${dia}', ${i})">${dia}</button>`
   ).join("");
   mostrarCoberturaDia(DIAS[0], 0);
+}
+
+// ---- Edición manual de un turno ya generado (clic en una celda de la tabla de Horarios) ----
+let turnoEditandoNombre = null;
+let turnoEditandoDia = null;
+
+function abrirModalEditarTurno(nombre, dia) {
+  if (!ultimoHorarioGenerado) return;
+  turnoEditandoNombre = nombre;
+  turnoEditandoDia = dia;
+  document.getElementById("modal-editar-turno-titulo").textContent = `Editar turno -- ${nombre} (${dia})`;
+  document.getElementById("editar-turno-error").textContent = "";
+
+  const info = ultimoHorarioGenerado.horario[nombre][dia];
+  if (info.tipo === "turno" && info.turnos && info.turnos.length) {
+    // Si había varios bloques (turno partido), se precarga el primero -- al guardar, el
+    // resto queda reemplazado por este único bloque (ver aviso en el modal).
+    const t = info.turnos[0];
+    document.getElementById("editar-turno-inicio").value = t.inicio;
+    document.getElementById("editar-turno-fin").value = t.fin;
+    document.getElementById("editar-turno-almuerzo-inicio").value = t.almuerzo_inicio ?? "";
+    document.getElementById("editar-turno-almuerzo-horas").value = t.almuerzo_horas || 0;
+  } else {
+    document.getElementById("editar-turno-inicio").value = 11;
+    document.getElementById("editar-turno-fin").value = 19;
+    document.getElementById("editar-turno-almuerzo-inicio").value = "";
+    document.getElementById("editar-turno-almuerzo-horas").value = 0;
+  }
+  abrirModal("modal-editar-turno");
+}
+
+async function _aplicarEdicionTurnoYRecalcular(nuevaCelda) {
+  ultimoHorarioGenerado.horario[turnoEditandoNombre][turnoEditandoDia] = nuevaCelda;
+  cerrarModal("modal-editar-turno");
+
+  const wrap = document.getElementById("horario-tabla-wrap");
+  const htmlPrevio = wrap.innerHTML;
+  wrap.innerHTML = "<div class='loading-spinner'><span class='spinner'></span> Recalculando...</div>";
+  try {
+    const data = await api("/horario/recalcular", {
+      method: "POST",
+      body: JSON.stringify({
+        fecha_lunes: ultimoHorarioParametros.fecha_lunes,
+        horario: ultimoHorarioGenerado.horario,
+        target_service_level: ultimoHorarioParametros.target_service_level,
+        shrinkage: ultimoHorarioParametros.shrinkage,
+        max_occupancy: ultimoHorarioParametros.max_occupancy,
+        factor_proyeccion: ultimoHorarioParametros.factor_proyeccion,
+        semanas_base: ultimoHorarioParametros.semanas_base,
+      }),
+    });
+    ultimoHorarioGenerado = data;
+    horarioGuardadoActual = false;
+    actualizarIndicadorGuardado();
+    renderHorario(data);
+  } catch (e) {
+    wrap.innerHTML = htmlPrevio;
+    alert(`No se pudo recalcular el horario con el cambio manual: ${e.message}`);
+  }
+}
+
+function guardarTurnoManual() {
+  const inicio = parseInt(document.getElementById("editar-turno-inicio").value, 10);
+  const fin = parseInt(document.getElementById("editar-turno-fin").value, 10);
+  const almInicioRaw = document.getElementById("editar-turno-almuerzo-inicio").value;
+  const almHoras = parseFloat(document.getElementById("editar-turno-almuerzo-horas").value) || 0;
+
+  if (isNaN(inicio) || isNaN(fin) || fin <= inicio) {
+    document.getElementById("editar-turno-error").textContent = "La hora fin debe ser mayor que la hora inicio.";
+    return;
+  }
+  const turno = { inicio, fin, excepcion: true };
+  if (almInicioRaw !== "" && almHoras > 0) {
+    const almInicio = parseInt(almInicioRaw, 10);
+    if (almInicio < inicio || almInicio + almHoras > fin) {
+      document.getElementById("editar-turno-error").textContent = "El almuerzo debe quedar dentro del turno.";
+      return;
+    }
+    turno.almuerzo_inicio = almInicio;
+    turno.almuerzo_horas = almHoras;
+  }
+  _aplicarEdicionTurnoYRecalcular({ tipo: "turno", turnos: [turno] });
+}
+
+function eliminarTurnoManual() {
+  _aplicarEdicionTurnoYRecalcular({ tipo: "libre", motivo: "editado_manual" });
 }
 
 let coberturaActual = null;
@@ -1268,26 +1365,92 @@ function descargarReporteEjecutivo() {
   descargarPdfSimple("/reporte-ejecutivo/pdf", "reporte_ejecutivo.pdf", params.toString());
 }
 
+async function descargarPdfSimplePost(endpoint, nombreArchivo, body) {
+  const boton = event.target;
+  const textoOriginal = boton.textContent;
+  boton.textContent = "Generando...";
+  boton.disabled = true;
+  try {
+    const res = await fetch(`${API}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || "No se pudo generar el archivo");
+    }
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = nombreArchivo;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    boton.textContent = textoOriginal;
+    boton.disabled = false;
+  }
+}
+
+// Arma el body para /horario/pdf y /horario/excel a partir de EXACTAMENTE lo que hay en
+// pantalla (ultimoHorarioGenerado) -- así lo que se descarga nunca difiere de lo que la
+// persona está viendo (horario guardado del Historial, o con ediciones manuales todavía
+// sin guardar). Devuelve null si no hay nada generado para esa fecha en memoria.
+function _bodyReporteHorarioExacto(fecha, mostrarCostos) {
+  if (!ultimoHorarioGenerado || !ultimoHorarioParametros || ultimoHorarioParametros.fecha_lunes !== fecha) {
+    return null;
+  }
+  return {
+    fecha_lunes: fecha,
+    horario: ultimoHorarioGenerado.horario,
+    target_service_level: ultimoHorarioParametros.target_service_level,
+    shrinkage: ultimoHorarioParametros.shrinkage,
+    max_occupancy: ultimoHorarioParametros.max_occupancy,
+    factor_proyeccion: ultimoHorarioParametros.factor_proyeccion,
+    semanas_base: ultimoHorarioParametros.semanas_base,
+    mostrar_costos: mostrarCostos,
+  };
+}
+
 function descargarPdfHorario(mostrarCostos = true) {
   const fecha = document.getElementById("horario-fecha")?.value || _proximoLunes();
+  const nombre = `reporte_horario_${fecha}${mostrarCostos ? '' : '_equipo'}.pdf`;
+  const body = _bodyReporteHorarioExacto(fecha, mostrarCostos);
+  if (body) {
+    descargarPdfSimplePost("/horario/pdf", nombre, body);
+    return;
+  }
+  // Respaldo: no hay nada generado en memoria para esta fecha (ej. se llamó directo sin
+  // pasar por la pantalla) -- genera de cero con los parámetros actuales.
   const sl = modoUltraProductividad ? "0.85" : "0.95";
   const shrinkage = "0.10";
   const ocupacion = "0.85";
   let params = `fecha_lunes=${fecha}&target_service_level=${sl}&shrinkage=${shrinkage}&max_occupancy=${ocupacion}&mostrar_costos=${mostrarCostos}`;
   const semanasBase = _semanasBaseSeleccionadas();
   if (semanasBase) params += `&semanas_base=${semanasBase}`;
-  descargarPdfSimple("/horario/pdf", `reporte_horario_${fecha}${mostrarCostos ? '' : '_equipo'}.pdf`, params);
+  descargarPdfSimple("/horario/pdf", nombre, params);
 }
 
 function descargarExcelHorario(mostrarCostos = true) {
   const fecha = document.getElementById("horario-fecha")?.value || _proximoLunes();
+  const nombre = `horario_${fecha}${mostrarCostos ? '' : '_equipo'}.xlsx`;
+  const body = _bodyReporteHorarioExacto(fecha, mostrarCostos);
+  if (body) {
+    descargarPdfSimplePost("/horario/excel", nombre, body);
+    return;
+  }
   const sl = modoUltraProductividad ? "0.85" : "0.95";
   const shrinkage = "0.10";
   const ocupacion = "0.85";
   let params = `fecha_lunes=${fecha}&target_service_level=${sl}&shrinkage=${shrinkage}&max_occupancy=${ocupacion}&mostrar_costos=${mostrarCostos}`;
   const semanasBase = _semanasBaseSeleccionadas();
   if (semanasBase) params += `&semanas_base=${semanasBase}`;
-  descargarPdfSimple("/horario/excel", `horario_${fecha}${mostrarCostos ? '' : '_equipo'}.xlsx`, params);
+  descargarPdfSimple("/horario/excel", nombre, params);
 }
 
 async function descargarPdfBrecha() {
@@ -1852,6 +2015,14 @@ async function verHorarioHistorial(fechaLunes) {
     modoUltraProductividad = registro.parametros.target_service_level <= 0.85;
     document.getElementById("ultra-productividad-estado").textContent = modoUltraProductividad ? "Encendido" : "Apagado";
     document.getElementById("btn-ultra-productividad").classList.toggle("activo", modoUltraProductividad);
+    // Importante: sincronizar el estado en memoria con lo que se está mostrando -- si no,
+    // "Descargar PDF/Excel" o editar un turno a mano después de ver un horario del
+    // Historial seguiría operando sobre lo último generado en esta sesión (o nada), no
+    // sobre lo que realmente está en pantalla.
+    ultimoHorarioGenerado = registro.resultado;
+    ultimoHorarioParametros = { ...registro.parametros, fecha_lunes: fechaLunes };
+    horarioGuardadoActual = true;
+    actualizarIndicadorGuardado();
     renderHorario(registro.resultado);
     document.getElementById("nota-historial")?.remove();
     document.getElementById("horario-resultados-wrap").insertAdjacentHTML("beforebegin",
@@ -2283,17 +2454,72 @@ async function guardarPerfil() {
   }
 }
 
-// ---------- PERSONAL: horas extra (requiere credenciales de superadmin) ----------
+// ---------- PERSONAL: selección múltiple (para habilitar horas extra masivo) ----------
 
-let horasExtraEmpleadoId = null;
+let empleadosSeleccionados = new Set();
+
+function toggleSeleccionEmpleado(id, marcado) {
+  if (marcado) empleadosSeleccionados.add(id);
+  else empleadosSeleccionados.delete(id);
+  const todas = document.querySelectorAll(".chk-empleado");
+  document.getElementById("chk-empleados-todos").checked =
+    todas.length > 0 && empleadosSeleccionados.size === todas.length;
+  actualizarBarraSeleccionEmpleados();
+}
+
+function toggleSeleccionTodosEmpleados(checkboxTodos) {
+  document.querySelectorAll(".chk-empleado").forEach(chk => {
+    chk.checked = checkboxTodos.checked;
+    const id = parseInt(chk.dataset.id, 10);
+    if (checkboxTodos.checked) empleadosSeleccionados.add(id);
+    else empleadosSeleccionados.delete(id);
+  });
+  actualizarBarraSeleccionEmpleados();
+}
+
+function deseleccionarTodosEmpleados() {
+  empleadosSeleccionados.clear();
+  document.querySelectorAll(".chk-empleado").forEach(chk => chk.checked = false);
+  const todos = document.getElementById("chk-empleados-todos");
+  if (todos) todos.checked = false;
+  actualizarBarraSeleccionEmpleados();
+}
+
+function actualizarBarraSeleccionEmpleados() {
+  const toolbar = document.getElementById("personal-bulk-toolbar");
+  const n = empleadosSeleccionados.size;
+  toolbar.style.display = n > 0 ? "flex" : "none";
+  document.getElementById("personal-bulk-count").textContent =
+    n === 1 ? "1 asesor seleccionado" : `${n} asesores seleccionados`;
+}
+
+// ---------- PERSONAL: horas extra (individual o masivo por selección) ----------
+
+let horasExtraEmpleadoId = null;   // modo individual: id del asesor
+let horasExtraModoMasivo = false;  // modo masivo: aplica a empleadosSeleccionados
 
 function abrirModalHorasExtra(id, nombre, permiteActual, horasActuales) {
+  horasExtraModoMasivo = false;
   horasExtraEmpleadoId = id;
   document.getElementById("horas-extra-titulo").textContent = `Horas extra — ${nombre}`;
+  document.getElementById("horas-extra-activar-label").textContent = "Permitir horas extra a este asesor";
   document.getElementById("horas-extra-activar").checked = !!permiteActual;
   document.getElementById("horas-extra-cantidad").value = horasActuales > 0 ? horasActuales : 8;
-  document.getElementById("horas-extra-superadmin-user").value = "";
-  document.getElementById("horas-extra-superadmin-pass").value = "";
+  document.getElementById("horas-extra-error").textContent = "";
+  onToggleHorasExtra();
+  abrirModal("modal-horas-extra");
+}
+
+function abrirModalHorasExtraMasivo() {
+  if (empleadosSeleccionados.size === 0) return;
+  horasExtraModoMasivo = true;
+  const n = empleadosSeleccionados.size;
+  document.getElementById("horas-extra-titulo").textContent =
+    `Horas extra — ${n} asesor${n === 1 ? "" : "es"} seleccionado${n === 1 ? "" : "s"}`;
+  document.getElementById("horas-extra-activar-label").textContent =
+    "Permitir horas extra a todos los seleccionados";
+  document.getElementById("horas-extra-activar").checked = true;
+  document.getElementById("horas-extra-cantidad").value = 8;
   document.getElementById("horas-extra-error").textContent = "";
   onToggleHorasExtra();
   abrirModal("modal-horas-extra");
@@ -2308,30 +2534,36 @@ async function guardarHorasExtra() {
   const errEl = document.getElementById("horas-extra-error");
   const permite = document.getElementById("horas-extra-activar").checked;
   const cantidad = parseFloat(document.getElementById("horas-extra-cantidad").value);
-  const superadminUser = document.getElementById("horas-extra-superadmin-user").value.trim();
-  const superadminPass = document.getElementById("horas-extra-superadmin-pass").value;
 
-  if (!superadminUser || !superadminPass) {
-    errEl.textContent = "Se requieren las credenciales de un superadmin.";
-    return;
-  }
   if (permite && (!cantidad || cantidad <= 0)) {
     errEl.textContent = "Define cuántas horas extra por semana (mayor que 0).";
     return;
   }
 
   try {
-    await api(`/empleados/${horasExtraEmpleadoId}/horas-extra`, {
-      method: "PUT",
-      body: JSON.stringify({
-        permite_horas_extra: permite,
-        max_horas_extra_semana: permite ? cantidad : 0,
-        superadmin_username: superadminUser,
-        superadmin_password: superadminPass,
-      }),
-    });
-    cerrarModal("modal-horas-extra");
-    cargarEmpleados();
+    if (horasExtraModoMasivo) {
+      const resp = await api(`/empleados/horas-extra/masivo`, {
+        method: "PUT",
+        body: JSON.stringify({
+          empleado_ids: [...empleadosSeleccionados],
+          permite_horas_extra: permite,
+          max_horas_extra_semana: permite ? cantidad : 0,
+        }),
+      });
+      cerrarModal("modal-horas-extra");
+      deseleccionarTodosEmpleados();
+      cargarEmpleados();
+    } else {
+      await api(`/empleados/${horasExtraEmpleadoId}/horas-extra`, {
+        method: "PUT",
+        body: JSON.stringify({
+          permite_horas_extra: permite,
+          max_horas_extra_semana: permite ? cantidad : 0,
+        }),
+      });
+      cerrarModal("modal-horas-extra");
+      cargarEmpleados();
+    }
   } catch (e) {
     errEl.textContent = e.message;
   }

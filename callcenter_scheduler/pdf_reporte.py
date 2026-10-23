@@ -8,7 +8,7 @@ tarjetas de KPI con acento de color, y gráficas reales en vez de solo tablas.
 
 import os
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 
 import matplotlib
 matplotlib.use("Agg")
@@ -69,6 +69,14 @@ HEX_VERDE = "#2C7A54"
 HEX_AZUL = "#3B7DD8"
 HEX_MUTED = "#9A9CA3"
 HEX_BORDE = "#E3E1DB"
+
+# ---- Paleta "plana" estilo Delivery 360 (reporte de Horario Semanal) ----
+COVER_BG = colors.HexColor("#15151D")        # fondo oscuro de la portada
+COVER_BG_2 = colors.HexColor("#1D1D28")      # panel diagonal, un tono más claro
+TEXTO_COVER_SUB = colors.HexColor("#C7C9D1")
+TEXTO_COVER_MUTED = colors.HexColor("#9A9CA8")
+CARD_BG_FLAT = colors.HexColor("#F7F6F2")    # fondo de tarjeta plana (crema muy claro)
+CARD_BORDE_GRIS = colors.HexColor("#A7ABB6")  # acento neutro por defecto
 
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "static", "assets", "kfc-logo.png")
 
@@ -137,6 +145,22 @@ ESTILO_TABLA = [
 
 # Mantener el nombre viejo por compatibilidad con cualquier referencia externa
 ESTILO_TABLA_HEADER_NEGRO = ESTILO_TABLA
+
+# Variante de tabla "plana" (encabezado gris claro en vez de negro sólido) -- usada en el
+# reporte de Horario Semanal para que combine con el resto de esa página, estilo Delivery 360
+ESTILO_TABLA_CLARO = [
+    ("FONTNAME", (0, 0), (-1, 0), F_MEDIUM),
+    ("FONTNAME", (0, 1), (-1, -1), F_REGULAR),
+    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EDECE7")),
+    ("TEXTCOLOR", (0, 0), (-1, 0), INK),
+    ("FONTSIZE", (0, 0), (-1, -1), 9),
+    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, CARD_BG_FLAT]),
+    ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ("LINEBELOW", (0, 0), (-1, -2), 0.4, BORDE),
+    ("LINEBELOW", (0, 0), (-1, 0), 0.9, BORDE),
+]
 ROJO_KFC = SIGNAL
 NEGRO = INK
 GRIS = TEXTO_MUTED
@@ -305,6 +329,275 @@ def _tarjetas_kpi(items: list, ancho_total, alto: float = 2.1*cm) -> Table:
 
 
 # ============================================================================
+# Diseño "plano" estilo Delivery 360 -- usado solo por el reporte de Horario Semanal:
+# portada oscura a página completa, encabezado claro de franja roja fina por sección,
+# tarjetas de KPI con acento de borde izquierdo (en vez de tarjetas sólidas de color) y
+# barras de ranking dibujadas directamente (en vez de gráficas de matplotlib).
+# ============================================================================
+
+def _dibujar_portada_horario(canvas, doc, datos):
+    """Portada a página completa: fondo oscuro, panel diagonal, franja roja lateral,
+    logo, título grande, badge de fecha y KPIs grandes directamente sobre el fondo --
+    igual que la portada del reporte de referencia (Delivery 360)."""
+    c = canvas
+    ancho, alto = doc.pagesize
+    c.saveState()
+    c.setFillColor(COVER_BG)
+    c.rect(0, 0, ancho, alto, stroke=0, fill=1)
+
+    c.setFillColor(COVER_BG_2)
+    path = c.beginPath()
+    path.moveTo(ancho * 0.58, alto)
+    path.lineTo(ancho, alto)
+    path.lineTo(ancho, 0)
+    path.lineTo(ancho * 0.72, 0)
+    path.close()
+    c.drawPath(path, stroke=0, fill=1)
+
+    c.setFillColor(SIGNAL)
+    c.rect(0, 0, 0.45 * cm, alto, stroke=0, fill=1)
+
+    margen_x = 2.6 * cm
+    if os.path.exists(LOGO_PATH):
+        logo_h = 1.9 * cm
+        logo_y = alto - 3.2 * cm
+        c.setFillColor(colors.white)
+        c.roundRect(margen_x, logo_y, logo_h, logo_h, 6, stroke=0, fill=1)
+        c.drawImage(LOGO_PATH, margen_x + 0.14 * cm, logo_y + 0.14 * cm,
+                    width=logo_h - 0.28 * cm, height=logo_h - 0.28 * cm,
+                    preserveAspectRatio=True, mask="auto")
+        texto_x = margen_x + logo_h + 0.55 * cm
+        baseline_marca = logo_y + logo_h / 2 - 0.14 * cm
+    else:
+        texto_x = margen_x
+        baseline_marca = alto - 2.6 * cm
+
+    c.setFillColor(colors.HexColor("#D8869A"))
+    c.setFont(F_MEDIUM, 10.5)
+    c.drawString(texto_x, baseline_marca, datos["marca"])
+
+    c.setFillColor(colors.white)
+    c.setFont(F_BOLD, 40)
+    c.drawString(margen_x, alto - 6.9 * cm, datos["titulo"])
+    c.setFillColor(TEXTO_COVER_SUB)
+    c.setFont(F_REGULAR, 12.5)
+    c.drawString(margen_x, alto - 7.75 * cm, datos["subtitulo"])
+
+    badge_texto = datos["badge"]
+    c.setFont(F_BOLD, 10.5)
+    badge_w = c.stringWidth(badge_texto, F_BOLD, 10.5) + 1.3 * cm
+    badge_h = 0.85 * cm
+    badge_y = alto - 9.3 * cm
+    c.setFillColor(SIGNAL)
+    c.roundRect(margen_x, badge_y, badge_w, badge_h, badge_h / 2, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.drawCentredString(margen_x + badge_w / 2, badge_y + badge_h / 2 - 3.8, badge_texto)
+
+    linea_y = alto - 10.7 * cm
+    c.setStrokeColor(colors.Color(1, 1, 1, alpha=0.2))
+    c.setLineWidth(1)
+    c.line(margen_x, linea_y, ancho - 2.2 * cm, linea_y)
+
+    kpis = datos["kpis"]
+    n = max(len(kpis), 1)
+    ancho_disp = (ancho - 2.2 * cm) - margen_x
+    col_w = ancho_disp / n
+    col_gap = 0.5 * cm
+    ancho_col_texto = col_w - col_gap
+    y_valor = linea_y - 1.55 * cm
+    y_label_top = linea_y - 1.9 * cm
+    for i, kpi in enumerate(kpis):
+        x = margen_x + i * col_w
+        valor_txt = str(kpi["valor"])
+        # El número se encoge si no cabe en su columna (ej. montos largos en $) en vez de
+        # invadir la columna vecina.
+        font_valor = 22
+        while font_valor > 13 and c.stringWidth(valor_txt, F_BOLD, font_valor) > ancho_col_texto:
+            font_valor -= 1
+        c.setFillColor(colors.white)
+        c.setFont(F_BOLD, font_valor)
+        c.drawString(x, y_valor, valor_txt)
+
+        label_p = Paragraph(kpi["label"], ParagraphStyle(
+            "KpiLabelPortada", fontName=F_REGULAR, fontSize=8.3,
+            textColor=TEXTO_COVER_MUTED, leading=10.2))
+        _, h_label = label_p.wrap(ancho_col_texto, 1.2 * cm)
+        label_p.drawOn(c, x, y_label_top - h_label)
+
+    c.setFillColor(TEXTO_COVER_MUTED)
+    c.setFont(F_REGULAR, 8.5)
+    c.drawString(margen_x, 1.5 * cm, datos["generado"])
+    c.drawString(margen_x, 1.05 * cm, datos["pie"])
+    c.restoreState()
+
+
+def _numero_pagina_desde_2(canvas, doc):
+    """Numera las páginas de contenido (1, 2, 3...) sin contar la portada -- la portada
+    (página física 1) no lleva número, igual que en el reporte de referencia."""
+    n = canvas.getPageNumber()
+    if n <= 1:
+        return
+    canvas.saveState()
+    canvas.setFont(F_REGULAR, 8)
+    canvas.setFillColor(TEXTO_MUTED)
+    canvas.drawRightString(doc.pagesize[0] - 1.8 * cm, 1.0 * cm, f"Página {n - 1}")
+    canvas.restoreState()
+
+
+class _SeccionHeaderClaro(Flowable):
+    """Encabezado claro de una página/sección interior: franja roja fina a todo lo ancho
+    (igual truco de 'escapar' los márgenes que usa _HeroHeader), título en negro, subtítulo
+    gris, una badge roja con el rango de fechas a la derecha y una línea divisoria."""
+
+    def __init__(self, ancho_pagina, titulo, subtitulo, badge):
+        super().__init__()
+        self.ancho_pagina = ancho_pagina
+        self.ancho_frame = ancho_pagina - 3.6 * cm
+        self.titulo = titulo
+        self.subtitulo = subtitulo
+        self.badge = badge
+        self.alto = 1.95 * cm
+
+    def wrap(self, availWidth, availHeight):
+        return (self.ancho_pagina, self.alto)
+
+    def draw(self):
+        c = self.canv
+        c.saveState()
+        x0 = -1.8 * cm
+        c.setFillColor(SIGNAL)
+        c.rect(x0, self.alto - 0.22 * cm, self.ancho_pagina, 0.22 * cm, stroke=0, fill=1)
+
+        c.setFillColor(INK)
+        c.setFont(F_BOLD, 15.5)
+        c.drawString(0, self.alto - 1.02 * cm, self.titulo)
+        c.setFillColor(TEXTO_MUTED)
+        c.setFont(F_REGULAR, 9)
+        c.drawString(0, self.alto - 1.44 * cm, self.subtitulo)
+
+        c.setFont(F_BOLD, 9.5)
+        badge_w = c.stringWidth(self.badge, F_BOLD, 9.5) + 0.9 * cm
+        badge_h = 0.62 * cm
+        badge_x = self.ancho_frame - badge_w
+        badge_y = self.alto - 1.18 * cm
+        c.setFillColor(SIGNAL)
+        c.roundRect(badge_x, badge_y, badge_w, badge_h, badge_h / 2, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.drawCentredString(badge_x + badge_w / 2, badge_y + badge_h / 2 - 3.2, self.badge)
+
+        c.setStrokeColor(BORDE)
+        c.setLineWidth(0.6)
+        c.line(0, 0.1 * cm, self.ancho_frame, 0.1 * cm)
+        c.restoreState()
+
+
+def _encabezado_claro(titulo: str, subtitulo: str, badge: str, ancho_pagina) -> list:
+    return [_SeccionHeaderClaro(ancho_pagina, titulo, subtitulo, badge), Spacer(1, 10)]
+
+
+class _TarjetaKPIFlat(Flowable):
+    """Tarjeta de KPI plana: fondo crema claro, acento de color SOLO en el borde
+    izquierdo (no relleno sólido), número grande en negro y etiqueta chica gris --
+    el mismo lenguaje visual que las tarjetas de 'Resumen ejecutivo' del reporte de
+    referencia (Delivery 360), muy distinto a la tarjeta de color sólido de los
+    demás reportes de este sistema."""
+
+    def __init__(self, ancho, alto, label, valor, color_acento):
+        super().__init__()
+        self.ancho = ancho
+        self.alto = alto
+        self.label = label
+        self.valor = valor
+        self.color_acento = color_acento
+
+    def wrap(self, availWidth, availHeight):
+        return (self.ancho, self.alto)
+
+    def draw(self):
+        c = self.canv
+        c.saveState()
+        c.setFillColor(CARD_BG_FLAT)
+        c.roundRect(0, 0, self.ancho, self.alto, 4, stroke=0, fill=1)
+        c.setFillColor(self.color_acento)
+        c.roundRect(0, 0, 0.14 * cm, self.alto, 2, stroke=0, fill=1)
+
+        c.setFillColor(INK)
+        c.setFont(F_BOLD, 18)
+        c.drawString(14, self.alto - 28, str(self.valor))
+
+        texto_label = Paragraph(self.label, ParagraphStyle(
+            "KpiLabelGris", fontName=F_MEDIUM, fontSize=8.2,
+            textColor=TEXTO_MUTED, leading=10.5))
+        texto_label.wrap(self.ancho - 24, self.alto)
+        texto_label.drawOn(c, 14, 10)
+        c.restoreState()
+
+
+def _tarjetas_kpi_flat(items: list, ancho_total, alto: float = 2.15 * cm) -> Table:
+    """items: lista de dicts {label, valor, color (opcional)}. Fila de tarjetas planas
+    con acento de borde izquierdo, estilo Delivery 360."""
+    n = len(items)
+    gap = 0.28 * cm
+    ancho_col = (ancho_total - gap * (n - 1)) / n
+    fila = [_TarjetaKPIFlat(ancho_col, alto, it["label"], it["valor"],
+                            it.get("color", CARD_BORDE_GRIS)) for it in items]
+    colwidths = [ancho_col] * n
+    t = Table([fila], colWidths=colwidths, spaceAfter=0)
+    t.setStyle(TableStyle([
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (0, -2), gap),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return t
+
+
+class _RankingBarras(Flowable):
+    """Barras horizontales dibujadas directamente (nada de matplotlib): rectángulos de
+    esquinas redondeadas escalados al valor máximo, pista de fondo gris clarita, con la
+    etiqueta a la izquierda y el valor impreso al final de la barra -- el mismo lenguaje
+    visual de 'ranking' plano del reporte de referencia (Delivery 360)."""
+
+    def __init__(self, ancho, filas, max_valor=None, ancho_label=4.6 * cm):
+        """filas: lista de dicts {label, valor, texto, color}. 'valor' escala la barra
+        (0..max_valor); 'texto' es lo que se imprime al final de la barra."""
+        super().__init__()
+        self.ancho = ancho
+        self.filas = filas
+        self.max_valor = max_valor if max_valor else (max((f["valor"] for f in filas), default=1) or 1)
+        self.ancho_label = ancho_label
+        self.alto_fila = 0.85 * cm
+        self.alto = self.alto_fila * len(filas)
+
+    def wrap(self, availWidth, availHeight):
+        return (self.ancho, self.alto)
+
+    def draw(self):
+        c = self.canv
+        c.saveState()
+        ancho_barra_max = self.ancho - self.ancho_label - 2.6 * cm
+        for i, f in enumerate(self.filas):
+            y = self.alto - (i + 1) * self.alto_fila
+            y_centro = y + self.alto_fila / 2
+            c.setFillColor(INK)
+            c.setFont(F_MEDIUM, 9.5)
+            c.drawString(0, y_centro - 3.2, f["label"])
+
+            barra_alto = 0.46 * cm
+            barra_y = y_centro - barra_alto / 2
+            barra_w = max(ancho_barra_max * (f["valor"] / self.max_valor), 0.12 * cm)
+            c.setFillColor(colors.HexColor("#EDECE7"))
+            c.roundRect(self.ancho_label, barra_y, ancho_barra_max, barra_alto,
+                        barra_alto / 2, stroke=0, fill=1)
+            c.setFillColor(f.get("color", SIGNAL))
+            c.roundRect(self.ancho_label, barra_y, barra_w, barra_alto,
+                        barra_alto / 2, stroke=0, fill=1)
+
+            c.setFillColor(INK)
+            c.setFont(F_BOLD, 9.5)
+            c.drawString(self.ancho_label + ancho_barra_max + 0.25 * cm, y_centro - 3.2, f["texto"])
+        c.restoreState()
+
+
+# ============================================================================
 # Gráficas (matplotlib, estilo propio -- Poppins, paleta de marca, sin bordes de más)
 # ============================================================================
 
@@ -344,6 +637,55 @@ def _grafico_cobertura_semana(por_dia: dict, dias: list = None) -> str:
     ax.tick_params(axis="x", labelsize=9.5)
     ax.tick_params(axis="y", labelsize=8)
     _estilizar_ejes(ax)
+    fig.tight_layout()
+    return _guardar_temp(fig)
+
+
+def _grafico_cobertura_todos_los_dias(cobertura: dict, dias: list = None) -> str:
+    """Una sola imagen con los 7 días en rejilla (4 columnas x 2 filas, la última celda
+    vacía) -- requeridos (barra gris) vs programados (barra verde si alcanza, rust si
+    queda corta) por hora, la misma vista que se ve en pantalla al cambiar de pestaña de
+    día en Horarios. Combinarlos en una sola figura (en vez de 7 imágenes sueltas) evita
+    dejar una página casi en blanco al final y mantiene todo en una sola hoja del PDF."""
+    dias = dias or DIAS_SEMANA
+    n_cols, n_filas = 4, 2
+    # Figura notablemente más alta que antes (4.6 -> 7.8) -- hay sobra de espacio vertical
+    # en esa página del PDF sin esto, y a tamaño chico las barras y las horas se veían
+    # apretadas. Se usa más espacio en la hoja a propósito para que se vea bien.
+    fig, axes = plt.subplots(n_filas, n_cols, figsize=(11.2, 7.8), dpi=170)
+    axes_flat = axes.flatten()
+
+    for ax, dia in zip(axes_flat, dias):
+        cobertura_dia = cobertura.get(dia, {})
+        horas = sorted(cobertura_dia.keys())
+        requeridos = [cobertura_dia[h]["requeridos"] for h in horas]
+        programados = [cobertura_dia[h]["programados"] for h in horas]
+        colores_prog = [HEX_SIGNAL if p < r else HEX_VERDE for p, r in zip(programados, requeridos)]
+
+        x = list(range(len(horas)))
+        ancho = 0.4
+        ax.bar([i - ancho/2 for i in x], requeridos, width=ancho, color=HEX_MUTED,
+               alpha=0.55, zorder=3)
+        ax.bar([i + ancho/2 for i in x], programados, width=ancho, color=colores_prog, zorder=3)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{h}h" for h in horas], fontsize=7.5, rotation=40)
+        ax.tick_params(axis="y", labelsize=8.5)
+        ax.set_title(dia, fontsize=13.5, color=HEX_INK, loc="left", fontweight="bold", pad=10)
+        _estilizar_ejes(ax)
+
+    # Última celda (8va, no hay 8vo día): en vez de dejarla en blanco, aloja ahí mismo la
+    # leyenda -- así no compite por espacio con las etiquetas del eje x de Domingo.
+    handles = [plt.Rectangle((0, 0), 1, 1, color=HEX_MUTED, alpha=0.55),
+               plt.Rectangle((0, 0), 1, 1, color=HEX_VERDE),
+               plt.Rectangle((0, 0), 1, 1, color=HEX_SIGNAL)]
+    ax_leyenda = axes_flat[len(dias)]
+    for spine in ax_leyenda.spines.values():
+        spine.set_visible(False)
+    ax_leyenda.set_xticks([])
+    ax_leyenda.set_yticks([])
+    ax_leyenda.legend(handles, ["Requeridos", "Programados (cubre)", "Programados (falta)"],
+                       loc="center left", fontsize=12, frameon=False)
+
     fig.tight_layout()
     return _guardar_temp(fig)
 
@@ -480,58 +822,125 @@ def _grafico_heatmap_llamadas(desglose) -> str:
 
 def generar_pdf_horario(fecha_lunes: date, target_service_level: float = 0.95, shrinkage: float = 0.10,
                          db_path: str = "callcenter.db", max_occupancy: float = 0.85, semanas_base: list = None,
-                         mostrar_costos: bool = True, salida: str = "reporte_horario.pdf") -> str:
+                         mostrar_costos: bool = True, salida: str = "reporte_horario.pdf",
+                         resultado: dict = None, costo: dict = None, nivel_servicio: dict = None) -> str:
     """PDF del horario generado: tarjetas de KPI, gráfica de cobertura por día, desglose de
     costo, y el cuadrante completo de turnos. 'mostrar_costos=False' genera la versión para
-    enviar al equipo, sin ningún valor monetario."""
-    resultado = generar_horario_semana(fecha_lunes, db_path=db_path, target_service_level=target_service_level,
-                                        shrinkage=shrinkage, max_occupancy=max_occupancy, semanas_base=semanas_base)
-    costo = calcular_costo_horario(resultado, db_path=db_path)
-    nivel_servicio = estimar_nivel_servicio_real(resultado)
+    enviar al equipo, sin ningún valor monetario.
+
+    Si se pasan 'resultado'/'costo'/'nivel_servicio' ya calculados (p. ej. desde el endpoint
+    que reconstruye exactamente el horario que la persona tiene en pantalla -- guardado del
+    historial o con ediciones manuales -- en vez de volver a correr el algoritmo desde cero),
+    el PDF se arma con ESOS datos tal cual, sin regenerar nada. Si no se pasan, se comporta
+    igual que antes: genera el horario de cero con los parámetros dados."""
+    if resultado is None:
+        resultado = generar_horario_semana(fecha_lunes, db_path=db_path, target_service_level=target_service_level,
+                                            shrinkage=shrinkage, max_occupancy=max_occupancy, semanas_base=semanas_base)
+    if costo is None:
+        costo = calcular_costo_horario(resultado, db_path=db_path)
+    if nivel_servicio is None:
+        nivel_servicio = estimar_nivel_servicio_real(resultado)
     horas_trabajadas = [h for h in resultado["horas_semana"].values() if h > 0]
     promedio_horas = round(sum(horas_trabajadas) / len(horas_trabajadas), 1) if horas_trabajadas else 0
     huecos = len([a for a in resultado["alertas"] if "faltan" in a])
 
     doc = _crear_documento(salida, apaisado=True)
     ancho_util = doc.pagesize[0] - doc.leftMargin - doc.rightMargin
+    ancho_pagina = doc.pagesize[0]
     rutas_temp = []
 
-    titulo = "Horario Semanal" + ("" if mostrar_costos else " · Equipo")
-    story = _encabezado("PLANEACIÓN DE TURNOS", titulo,
-                         f"Semana del {fecha_lunes.isoformat()}   |   Meta de servicio {int(target_service_level*100)}%"
-                         f"   |   Generado el {date.today().isoformat()}", doc.pagesize[0])
-
-    # ---- Tarjetas de KPI ----
+    titulo_reporte = "Horario Semanal" + ("" if mostrar_costos else " · Equipo")
+    rango_badge = f"{fecha_lunes.isoformat()} – {(fecha_lunes + timedelta(days=6)).isoformat()}"
     sl_pct = nivel_servicio["sl_estimado_semana_pct"]
-    kpis = [
-        {"label": "% Contestación (semana)", "valor": f"{sl_pct}%", "color": _color_rl_por_umbral(sl_pct)},
-        {"label": "Horas-persona programadas", "valor": f"{sum(resultado['horas_semana'].values()):.0f}h", "color": AZUL_VIVO},
-        {"label": "Horas sin cubrir", "valor": str(huecos), "color": SIGNAL if huecos > 0 else VERDE},
-        {"label": "Horas/sem promedio", "valor": f"{promedio_horas}h", "color": TEAL_VIVO},
+
+    # ---- Portada (página completa, estilo Delivery 360) ----
+    kpis_portada = [
+        {"label": "% Contestación est. (semana)", "valor": f"{sl_pct}%"},
+        {"label": "Horas-persona programadas", "valor": f"{sum(resultado['horas_semana'].values()):.0f}h"},
+        {"label": "Horas sin cubrir", "valor": str(huecos)},
+        {"label": "Horas/semana promedio", "valor": f"{promedio_horas}h"},
     ]
     if mostrar_costos:
-        kpis.insert(1, {"label": "Costo total semana", "valor": f"${costo['total_semana']:,.0f}", "color": MORADO_VIVO})
-    story.append(_tarjetas_kpi(kpis, ancho_util))
-    story.append(Spacer(1, 16))
+        kpis_portada.insert(1, {"label": "Costo total semana", "valor": f"${costo['total_semana']:,.0f}"})
 
-    # ---- Gráfica de cobertura por día ----
-    ruta = _grafico_cobertura_semana(nivel_servicio["por_dia"])
-    rutas_temp.append(ruta)
-    story.append(Image(ruta, width=ancho_util, height=ancho_util * 2.7/10.4))
+    datos_portada = {
+        "marca": "WFM  ·  PLANEACIÓN DE TURNOS",
+        "titulo": titulo_reporte.upper(),
+        "subtitulo": f"Meta de servicio {int(target_service_level*100)}%  ·  Call Center KFC Colombia",
+        "badge": f"Semana  {rango_badge}",
+        "kpis": kpis_portada,
+        "generado": f"Generado el {date.today().isoformat()}",
+        "pie": "Sistema de Gestión de Personal y Horarios — Call Center · Desarrollado por Sergio Ortiz",
+    }
 
-    # ---- Desglose de costo (solo si aplica) ----
+    # El contenido de la portada lo pinta el callback onFirstPage directamente sobre el
+    # canvas (fondo oscuro a sangre completa); el story arranca con un PageBreak para que
+    # Platypus pase de inmediato a la página 2, que sí usa flowables normales.
+    story = [PageBreak()]
+
+    # ---- Resumen ejecutivo: tarjetas de KPI planas (acento de borde, no relleno sólido) ----
+    story.extend(_encabezado_claro("Resumen ejecutivo",
+                                     "Indicadores clave del horario generado para la semana",
+                                     rango_badge, ancho_pagina))
+    kpis_resumen = [
+        {"label": "% Contestación est. (semana)", "valor": f"{sl_pct}%", "color": _color_rl_por_umbral(sl_pct)},
+        {"label": "Horas-persona programadas", "valor": f"{sum(resultado['horas_semana'].values()):.0f}h", "color": AZUL},
+        {"label": "Horas sin cubrir", "valor": str(huecos), "color": SIGNAL if huecos > 0 else VERDE},
+        {"label": "Horas/semana promedio", "valor": f"{promedio_horas}h", "color": CARD_BORDE_GRIS},
+    ]
+    if mostrar_costos:
+        kpis_resumen.insert(1, {"label": "Costo total semana", "valor": f"${costo['total_semana']:,.0f}", "color": AMBAR})
+    story.append(_tarjetas_kpi_flat(kpis_resumen, ancho_util))
+    story.append(Spacer(1, 22))
+
+    # ---- Cobertura estimada por día: barras planas (no gráfica de matplotlib) ----
+    story.append(Paragraph("Cobertura estimada por día", H2_STYLE))
+    story.append(Spacer(1, 4))
+    por_dia = nivel_servicio["por_dia"]
+    filas_cobertura = []
+    for dia in DIAS_SEMANA:
+        v = por_dia.get(dia, {}).get("sl_estimado_pct") or 0
+        filas_cobertura.append({"label": dia, "valor": v, "texto": f"{v:.0f}%",
+                                 "color": _color_rl_por_umbral(v)})
+    story.append(_RankingBarras(ancho_util, filas_cobertura, max_valor=100))
+
+    # ---- Desglose de costo semanal (solo si aplica), también como barras planas ----
     if mostrar_costos and costo.get("total_semana", 0) > 0:
-        ruta = _grafico_costo_desglose(costo)
-        rutas_temp.append(ruta)
-        ancho_donut = ancho_util * 0.42
-        img = Image(ruta, width=ancho_donut, height=ancho_donut * 3.6/5.6)
-        img.hAlign = "LEFT"
-        story.append(img)
+        d = costo.get("desglose", {})
+        categorias = [
+            ("Horas normales", d.get("base_hora_normal_equivalente", 0), SIGNAL),
+            ("Recargo nocturno", d.get("recargo_nocturno", 0), AMBAR),
+            ("Recargo dominical", d.get("extra_por_recargo_dominical", 0), AZUL),
+            ("Transporte", d.get("subsidio_transporte", 0), VERDE),
+        ]
+        categorias = [c for c in categorias if c[1] > 0]
+        if categorias:
+            story.append(Spacer(1, 14))
+            story.append(Paragraph("Desglose del costo semanal", H2_STYLE))
+            story.append(Spacer(1, 4))
+            filas_costo = [{"label": n, "valor": v, "texto": f"${v:,.0f}", "color": c}
+                           for n, v, c in categorias]
+            story.append(_RankingBarras(ancho_util, filas_costo))
 
     story.append(PageBreak())
 
+    # ---- Gráficas diarias de cobertura (requeridos vs programados, hora a hora) --
+    # la misma vista que en pantalla al cambiar de pestaña de día en Horarios, los 7 días
+    # juntos en una sola imagen (rejilla 4x2) para que quepan bien en una hoja. ----
+    story.extend(_encabezado_claro("Cobertura por hora, día a día",
+                                     "Personal requerido vs. programado, hora a hora",
+                                     rango_badge, ancho_pagina))
+    ruta = _grafico_cobertura_todos_los_dias(resultado["cobertura"])
+    rutas_temp.append(ruta)
+    story.append(Image(ruta, width=ancho_util, height=ancho_util * 7.8/11.2))
+
+    story.append(PageBreak())
+    # (El cuadrante de turnos va en su propia página -- la tabla completa de 7 días x N
+    # asesores normalmente no cabe junto a las gráficas de arriba sin verse apretada.)
+
     # ---- Cuadrante de turnos ----
-    story.append(Paragraph("Cuadrante de turnos", H2_STYLE))
+    story.extend(_encabezado_claro("Cuadrante de turnos", "Horario asignado por asesor y día",
+                                     rango_badge, ancho_pagina))
     motivos_abrev = {"no_disponible": "No disp.", "sin_informacion": "Sin info",
                       "libre_no_requerido": "Libre", "tope_semanal_alcanzado": "Tope sem.",
                       "descanso_asignado": "Descanso"}
@@ -558,13 +967,15 @@ def generar_pdf_horario(fecha_lunes: date, target_service_level: float = 0.95, s
         filas_horario.append(fila)
 
     t2 = Table(filas_horario, colWidths=[3.6*cm] + [2.7*cm]*7 + [2*cm], repeatRows=1)
-    t2.setStyle(TableStyle(ESTILO_TABLA + [("FONTSIZE", (0, 0), (-1, -1), 7.5)]))
+    t2.setStyle(TableStyle(ESTILO_TABLA_CLARO + [("FONTSIZE", (0, 0), (-1, -1), 7.5)]))
     story.append(t2)
     story.append(Paragraph("* turno de excepción por debajo del mínimo diario, asignado para no dejar la hora sin cobertura",
                             NOTA_STYLE))
 
     story.extend(_pie_pagina())
-    doc.build(story, onFirstPage=_numero_pagina, onLaterPages=_numero_pagina)
+    doc.build(story,
+              onFirstPage=lambda c, d: _dibujar_portada_horario(c, d, datos_portada),
+              onLaterPages=_numero_pagina_desde_2)
 
     for ruta in rutas_temp:
         if os.path.exists(ruta):

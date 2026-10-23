@@ -681,6 +681,8 @@ select#select-empleado-disp {
 .horario-table th { color: var(--text-muted); font-weight: 600; font-size: 11.5px; }
 .turno-badge { color: var(--text); font-weight: 600; }
 .libre-badge { color: var(--text-muted); font-size: 11.5px; }
+.turno-editable { cursor: pointer; transition: background-color .12s ease; border-radius: 4px; }
+.turno-editable:hover { background-color: rgba(200, 166, 92, 0.18); }
 
 .alertas-box {
   margin-top: 20px;
