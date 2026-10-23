@@ -63,6 +63,10 @@ class _CursorWrapper:
     def lastrowid(self):
         return self._cursor.lastrowid
 
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
     def _cols(self):
         return [d[0] for d in (self._cursor.description or [])]
 
@@ -86,6 +90,13 @@ class _TursoConnWrapper:
     def execute(self, sql, params=()):
         cur = self._conn.cursor()
         cur.execute(sql, params)
+        return _CursorWrapper(cur)
+
+    def executemany(self, sql, seq_of_params):
+        # libsql no siempre expone executemany igual que sqlite3: se hace en bucle.
+        cur = self._conn.cursor()
+        for params in seq_of_params:
+            cur.execute(sql, params)
         return _CursorWrapper(cur)
 
     def executescript(self, script):
