@@ -344,6 +344,253 @@ las sesiones — si lo borras, todos quedan desconectados y deben volver a ingre
   y el subsidio de transporte — el cálculo de costos en "Horarios" usa estos valores de
   inmediato, sin reiniciar nada.
 
+## Corrección: el PDF/Excel descargado podía dar números distintos a los de la pantalla (v4.5)
+
+Reportaste que el PDF descargado mostraba datos diferentes a los de la pantalla de
+Horarios (ej. 83.8% de contestación en el PDF vs. 93.1% en pantalla, con el banner
+"Mostrando el horario guardado..." visible). La causa: "Descargar PDF" y "Descargar Excel"
+**siempre volvían a correr el algoritmo de generación desde cero** con los parámetros de
+la URL, sin importar qué había realmente en pantalla. Si la pantalla mostraba:
+
+- un horario **guardado del Historial** (que puede haberse generado días antes, con otros
+  datos de llamadas disponibles en ese momento), o
+- un horario con **ediciones manuales** (turnos editados/borrados a mano) sin guardar
+  todavía,
+
+el PDF ignoraba todo eso y regeneraba un horario nuevo de cero -- dando números distintos
+a los que realmente se ven en pantalla (cobertura por día, costo, horas sin cubrir, etc.).
+
+**La corrección:** "Descargar PDF" y "Descargar Excel" ahora envían al servidor el horario
+EXACTO que está en pantalla (igual que ya hacía "Guardar en el Historial") en vez de pedirle
+al servidor que regenere todo de cero; el servidor arma el reporte con esos datos tal cual,
+sin volver a correr el algoritmo de asignación. De paso corregí un bug relacionado: al abrir
+un horario desde el Historial ("Ver"), la pantalla lo mostraba bien, pero el estado interno
+de la página (`ultimoHorarioGenerado`) no se actualizaba -- eso significaba que editar un
+turno a mano justo después de ver un horario del Historial podía operar sobre el horario
+equivocado. Ya quedó sincronizado.
+
+Si por algún motivo el navegador no tiene nada cargado en memoria (poco común), ambas
+descargas caen de respaldo al comportamiento viejo (regenerar de cero), para que el botón
+nunca se quede sin hacer nada.
+
+**Probado:** generé un horario, edité manualmente un turno (dejando a un asesor sin turno
+el Lunes, lo que cambia la cobertura real), y confirmé que tanto la pantalla recalculada
+como el PDF descargado después de esa edición muestran exactamente el mismo % de
+contestación (78.2% en la prueba) -- antes, el PDF viejo (regenerando de cero) daba un
+número distinto para la misma semana, reproduciendo el bug que reportaste.
+
+## Daily coverage charts más grandes (v4.5)
+
+En el PDF de Horarios, la página "Cobertura por hora, día a día" dejaba mucho espacio en
+blanco debajo de las gráficas. Las agrandé (ocupan bastante más alto de la hoja) y subí el
+tamaño de letra de los títulos de cada día, las horas del eje y la leyenda, para que se
+vean con más detalle sin tener que hacer zoom. Sigue cabiendo todo en una sola página.
+
+## PDF de Horarios: rediseño visual completo, estilo "Delivery 360" (v4.4)
+
+El diseño anterior del PDF de Horarios (portada oscura tipo "hero" en banda, tarjetas de
+KPI de color sólido, gráficas de torta/dona) se reemplazó por completo con un estilo más
+plano y minimalista, calcado del reporte de referencia que compartiste ("Compensaciones...
+Delivery 360"):
+
+- **Portada**: ahora es una página completa en vez de una banda — fondo oscuro con un
+  panel diagonal sutil, franja roja lateral, logo, título grande, una badge roja con el
+  rango de fechas de la semana, y los KPIs principales impresos en grande directamente
+  sobre el fondo oscuro (no en tarjetas).
+- **Páginas interiores**: franja roja fina arriba de toda la página (no la banda oscura
+  completa de antes), título y subtítulo en negro/gris, y la misma badge roja con el rango
+  de fechas repetida arriba a la derecha en cada sección.
+- **Tarjetas de KPI**: pasaron de ser recuadros de color sólido a tarjetas planas color
+  crema con un acento de color solo en el borde izquierdo, número grande en negro — igual
+  que la página de "Resumen ejecutivo" del reporte de referencia.
+- **"Cobertura estimada por día"**: antes era una gráfica de barras de matplotlib, ahora
+  son barras planas dibujadas directamente (sin ejes ni cuadrícula), coloreadas en
+  verde/ámbar/rojo según el umbral — el mismo lenguaje visual de "ranking" del reporte de
+  referencia.
+- **"Desglose del costo semanal"**: la dona se reemplazó por el mismo tipo de barras
+  planas (una por categoría: horas normales, recargo nocturno, recargo dominical,
+  transporte).
+- **Cuadrante de turnos**: el encabezado de la tabla pasó de fondo negro a gris claro,
+  para que combine con el resto de la página.
+
+La gráfica de "Cobertura por hora, día a día" (los 7 días en rejilla, la de v4.3) se dejó
+igual -- es una comparación de dos series por hora y una gráfica real sigue siendo la
+forma más clara de mostrarla; el reporte de referencia no tiene un equivalente directo a
+esa vista.
+
+Importante: este rediseño es **solo para el PDF de Horario Semanal** (el que descargas
+desde "Horarios"). Los otros PDFs del sistema (Brecha de Personal, Métricas, Personal,
+Disponibilidad, Permisos, Ejecutivo) siguen con el diseño anterior -- no los toqué en este
+cambio para no arriesgar nada que no pediste; si quieres que también se actualicen al
+nuevo estilo, dímelo y lo hago.
+
+**Probado:** generé el PDF con los mismos datos sintéticos de antes (8 asesores, 4 semanas
+de llamadas) y revisé las 4 páginas como imagen. En el primer intento los KPIs grandes de
+la portada se encimaban entre sí cuando el valor era ancho (ej. "$5,451,692" invadía la
+columna de al lado) -- lo corregí haciendo que el número se encoja automáticamente si no
+cabe en su columna, y envolviendo las etiquetas en vez de dejarlas en una sola línea.
+Verificado de nuevo tras el ajuste: ya no hay textos encimados en ninguna de las 4
+páginas, tanto en la versión con costos como en la "equipo".
+
+## PDF de Horarios: gráficas diarias de cobertura + reporte más "ejecutivo" (v4.3)
+
+El PDF que descargas desde Horarios ("Descargar PDF") ahora incluye una página nueva,
+**"Cobertura por hora, día a día"**: los 7 días en una sola rejilla (4 columnas x 2
+filas), cada uno con sus barras de Requeridos (gris) vs Programados (verde si cubre, rojo
+si falta) por hora -- la misma vista que ya tenías en pantalla al cambiar de pestaña de
+día en Horarios, pero ahora queda en el PDF para compartir o archivar. El resto del
+reporte (portada tipo "hero" con el logo, tarjetas de KPI de colores, barra de cobertura
+semanal, dona de desglose de costo, cuadrante de turnos) ya tenía ese estilo más
+"ejecutivo" -- lo nuevo es específicamente esa página de detalle por hora.
+
+Primer intento: puse las 7 gráficas como imágenes sueltas en una tabla de 2 columnas --
+con 7 (impar) sobraba una celda vacía y dejaba casi toda una página en blanco. Lo corregí
+armando una sola imagen con las 7 mini-gráficas ya organizadas (matplotlib `subplots`),
+con la leyenda ocupando el espacio de la "8va casilla" que no tiene día -- así no compite
+por espacio con las etiquetas de Domingo y no sobra página en blanco. Antes: 4 páginas
+para una semana con 8 asesores. Ahora: 3.
+
+**Probado:** generé el PDF con datos sintéticos (8 asesores, 4 semanas de llamadas con
+patrón de pico realista) y revisé cada página como imagen para confirmar que las gráficas
+se ven bien, la leyenda no se encima con nada, y el cuadrante de turnos sigue intacto --
+tanto en la versión con costos como en la versión "equipo" (sin valores monetarios).
+
+## Corrección: el clic para editar un turno no hacía nada (v4.2)
+
+En v4.0, al hacer clic en una celda de Horarios para editarla a mano, el atributo
+`onclick` se armaba con comillas dobles por fuera Y por dentro (`JSON.stringify` también
+usa comillas dobles) -- eso cortaba el atributo a la mitad con CUALQUIER nombre de asesor,
+dejando un `onclick` inválido. Resultado: la celda sí se veía resaltada al pasar el mouse
+(eso es solo CSS, por la clase `turno-editable`), pero el clic no hacía nada, porque el
+manejador quedaba roto antes de llegar al navegador. Se corrigió envolviendo el atributo
+en comillas simples (como el resto del archivo) y escapando cualquier comilla simple que
+traiga el nombre -- probado con nombres normales y con uno que lleva apóstrofe (ej.
+"O'Brien") para confirmar que el HTML generado queda bien formado en ambos casos.
+
+## Horas extra: ya no pide superadmin, y se puede aplicar a varios asesores a la vez (v4.1)
+
+Dos cambios en "Personal" → columna "Horas extra":
+
+- **Ya no exige credenciales de un superadmin** escritas en el momento para activar o
+  desactivar horas extra de un asesor -- cualquier usuario con acceso al módulo Personal
+  lo hace directamente con su propia sesión, con un clic en "Gestionar". Sigue quedando
+  registrado en Auditoría y en el historial de autorizaciones (quién lo hizo, cuándo, y
+  el antes/después), solo que ya no hay un segundo paso de confirmación.
+- **Selección múltiple**: ahora cada fila de la tabla de Personal tiene un checkbox (y uno
+  en el encabezado para seleccionar todos). Al marcar uno o más asesores aparece una barra
+  con el botón "⚡ Horas extra a seleccionados", que abre el mismo modal pero aplicado a
+  todos los seleccionados de una sola vez (misma cantidad de horas extra para todos) --
+  antes había que entrar asesor por asesor.
+
+Si de verdad quieres que ese cambio (activar/desactivar horas extra) siga necesitando una
+segunda persona que lo confirme, avísame y lo dejamos como antes solo para esa acción --
+tal como quedó ahora, cualquiera con acceso a Personal puede autorizarlas sin que nadie más
+lo confirme.
+
+**Probado:** individual (sin pedir superadmin) y masivo (2 asesores a la vez, activar y
+desactivar), verificando que la base de datos y el registro de auditoría/autorizaciones
+queden correctos -- end-to-end contra la app real en este entorno de pruebas.
+
+## Corrección: autorizar horas extra / ampliar disponibilidad no se usaba, y edición manual de turnos (v4.0)
+
+**El bug encontrado (causa raíz de "autorizo horas extra y amplío disponibilidad, pero
+igual me quedan horas sin cubrir"):**
+
+Dentro del algoritmo que llena cada día (`_procesar_dia` en `generador_horarios.py`), en
+cada vuelta se elegía la hora **más urgente** con déficit (la más difícil de cubrir, ej.
+la hora de apertura) y se buscaba quién podía cubrirla. El bug: si para ESA hora puntual
+no había ningún asesor/plantilla que calzara, el código hacía `break` y **abandonaba
+TODO el resto del día** — incluso horas con déficit que sí tenían gente disponible y
+presupuesto semanal de sobra para cubrirlas. Bastaba con que una sola hora difícil (ej.
+la apertura, que casi nadie alcanza por su horario de disponibilidad) no tuviera
+candidato, para que ninguna otra hora de ese día se intentara cubrir en esa pasada — así
+hubiera autorizado horas extra a todo el mundo o ampliado su disponibilidad: esas horas
+extra nunca llegaban a usarse, porque el código ni siquiera llegaba a intentar asignarlas.
+
+**La corrección:** ahora, cuando la hora más urgente no tiene candidato, se marca esa
+hora puntual como "no cubrible en esta pasada" y se sigue intentando con las demás horas
+con déficit del mismo día, en vez de rendirse con el día completo. Esto se validó con una
+simulación aislada del mismo algoritmo (misma lógica exacta, antes/después): con 3 horas
+de déficit donde la primera (más urgente) era imposible de cubrir pero las otras 2 sí
+tenían gente disponible, **antes** del fix se cubrían 0 de 6 horas-agente necesarias;
+**después**, se cubren 4 de 6 (las que sí eran posibles). Esto es justo el patrón que
+describiste: un hueco puntual difícil (ej. Viernes en tu captura, con 61.3%) bloqueaba
+todo lo demás de ese día, sin importar cuánta gente/horas extra hubiera disponibles.
+También se corrigió un bug relacionado que solo aparece con demanda en cero para algún
+día (un "No pudimos comparar `None` con un número" al revertir un rebalanceo) — no
+debería afectarte con datos reales, pero quedó blindado.
+
+**Qué SÍ se verificó:** la lógica del fix se probó de forma aislada (antes/después, con
+los números exactos de arriba) y además de principio a fin contra la app real (login,
+crear un asesor, generar un horario, editarlo a mano y recalcular) sin errores. **Qué NO
+se pudo verificar:** el efecto exacto sobre TU semana específica (cuántas horas más se
+cubren con tus 20 plantillas y tus datos reales) — eso solo se ve generando de nuevo el
+horario de esa semana con los datos ya cargados (horas extra autorizadas + disponibilidad
+ampliada) y comparando contra la captura que me mandaste. Si el promedio de horas/asesor
+sigue bajo después de esto, el siguiente sospechoso a revisar sería si alguna de tus 20
+plantillas activas realmente llega a cubrir las horas más críticas del déficit (el
+sistema está en "Modo Plantillas", así que solo puede usar los bloques que ya tienes
+definidos en "Turnos" — si ninguno calza con la hora crítica, ahí sí haría falta crear o
+ajustar una plantilla, no solo autorizar más horas).
+
+## Edición manual de turnos ya generados (v4.0)
+
+Ahora, en la vista de **Horarios**, después de generar el cuadrante de la semana, puedes
+hacer clic en cualquier celda de la tabla (tenga o no turno asignado) para editarla a
+mano: cambiar la hora de inicio/fin, añadir un almuerzo, extender un turno, o quitarlo
+por completo (queda "Libre (manual)"). Al guardar, el sistema recalcula al instante (sin
+volver a correr el generador automático) la cobertura real, las horas semanales de ese
+asesor, el costo y el % de servicio estimado — para que los números en pantalla siempre
+reflejen exactamente lo que dejaste editado.
+
+Limitaciones honestas de esta primera versión:
+- Si una celda tenía un turno partido (2 bloques el mismo día), al editarla se
+  reemplazan ambos por un único bloque — no hay (todavía) un editor para turnos
+  partidos de 2+ bloques.
+- La edición no vuelve a correr las reglas de disponibilidad/plantillas — es una
+  anulación manual deliberada, así que el sistema no te va a impedir poner un turno
+  fuera de la disponibilidad declarada de ese asesor o fuera de sus plantillas; es una
+  herramienta de ajuste fino para el humano, no otro algoritmo.
+- El historial usado para la "rotación justa" de semanas futuras sí queda sincronizado
+  con tu edición manual (para que no afecte negativamente a quién le toca descansar
+  después), pero el guardado en el Historial de horarios (botón "Guardar en el
+  Historial") sigue siendo un paso manual aparte, igual que antes.
+- Probado de principio a fin (crear un turno manual, verificar que el costo/horas/
+  cobertura se recalculan bien, y quitarlo de nuevo) contra la app real en este entorno
+  de pruebas — no contra tu base de datos real en Turso/Render.
+
+## migrar_a_turso.py ahora tolera pegar la URL completa en --org (v3.9)
+
+Si pegas `https://app.turso.tech/tu-organizacion/` en `--org` (fácil de hacer
+copiando del navegador), el script ya lo normaliza solo y se queda con el slug —
+antes eso producía un 404 confuso de la API ("no such route"), porque armaba
+una URL inválida por dentro.
+
+## Migrar tu callcenter.db actual a Turso (v3.8)
+
+Si ya tienes datos reales en tu `callcenter.db` local (empleados, horarios generados,
+usuarios, auditoría) y no quieres empezar de cero en Turso, usa `migrar_a_turso.py`:
+
+```
+py migrar_a_turso.py --token TU_API_TOKEN --org TU_ORGANIZACION --db-file callcenter.db
+```
+
+- `TU_API_TOKEN`: Turso dashboard -> ícono de cuenta -> "Account Settings" -> "API Tokens".
+- `TU_ORGANIZACION`: el "slug" que aparece en la URL del dashboard.
+
+No necesita el CLI de Turso (que en Windows pide WSL) — solo Python + `requests`,
+hablando directo con la API de Turso. Trabaja sobre una copia temporal, nunca toca
+tu `callcenter.db` original. Al final imprime el `TURSO_DATABASE_URL` y
+`TURSO_AUTH_TOKEN` listos para pegar en Render.
+
+**Nota de honestidad**: probé a fondo la parte de preparar el archivo (modo WAL,
+checkpoint, que el original quede intacto) con datos reales. La parte que habla con
+la API de Turso (crear base, crear token, subir archivo) la armé siguiendo la
+documentación oficial línea por línea, pero no la pude probar de punta a punta
+porque no tengo cómo crear una cuenta Turso real desde acá — es la primera vez que
+corre contra el servicio real va a ser cuando tú lo ejecutes. Si algo falla, el
+script te dice en qué paso fue y qué error dio Turso — mándamelo y lo ajustamos.
+
 ## Soporte para Turso (base de datos en la nube) — despliegue en línea (v3.7)
 
 Para poder subir el sistema a Render (gratis) sin perder los datos al reiniciarse

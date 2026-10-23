@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Horarios CDC</title>
 <link rel="icon" type="image/png" href="assets/kfc-logo.png">
-<link rel="stylesheet" href="style.css?v=6">
+<link rel="stylesheet" href="style.css?v=7">
 <script>
   (function() {
     var tema = localStorage.getItem('tema_horarios_cdc') || 'light';
@@ -87,20 +87,10 @@
     <h2 id="horas-extra-titulo">Horas extra</h2>
     <label style="display:flex; align-items:center; gap:6px; font-weight:400;">
       <input type="checkbox" id="horas-extra-activar" onchange="onToggleHorasExtra()">
-      Permitir horas extra a este asesor
+      <span id="horas-extra-activar-label">Permitir horas extra a este asesor</span>
     </label>
     <label id="horas-extra-cantidad-wrap" style="display:none;">Máximo de horas extra por semana
       <input id="horas-extra-cantidad" type="number" min="1" max="20" value="8">
-    </label>
-    <p style="font-size:12px; color:var(--text-muted); background:#FBF3D9; padding:10px 12px; border-radius:8px; margin:12px 0;">
-      🔒 Este cambio requiere las credenciales de un <strong>superadmin</strong>, sin importar
-      quién esté haciendo el cambio ahora mismo. Queda registrado en Auditoría.
-    </p>
-    <label>Usuario superadmin
-      <input id="horas-extra-superadmin-user" type="text" autocomplete="off">
-    </label>
-    <label>Contraseña
-      <input id="horas-extra-superadmin-pass" type="password" autocomplete="off">
     </label>
     <p id="horas-extra-error" class="error-text"></p>
     <div class="modal-actions">
@@ -163,7 +153,7 @@
         <button class="nav-footer-btn" onclick="hacerLogout()">Cerrar sesión</button>
       </div>
       <div class="nav-footer-meta">
-        <span style="color:#C8A65C; font-weight:700; font-family:var(--font-display);">v3.7</span><br>
+        <span style="color:#C8A65C; font-weight:700; font-family:var(--font-display);">v4.5</span><br>
         <span style="opacity:0.75;">Sistema creado por Sergio Ortiz</span>
       </div>
     </div>
@@ -230,9 +220,16 @@
         </div>
       </header>
 
+      <div id="personal-bulk-toolbar" style="display:none; align-items:center; gap:12px; margin-bottom:10px; padding:8px 12px; background:#FBF3D9; border-radius:8px;">
+        <span id="personal-bulk-count" style="font-size:13px; color:var(--text-muted);"></span>
+        <button class="btn-primary" onclick="abrirModalHorasExtraMasivo()">⚡ Horas extra a seleccionados</button>
+        <button class="btn-ghost" onclick="deseleccionarTodosEmpleados()">Cancelar selección</button>
+      </div>
+
       <table class="data-table">
         <thead>
           <tr>
+            <th><input type="checkbox" id="chk-empleados-todos" onchange="toggleSeleccionTodosEmpleados(this)"></th>
             <th>Nombre</th>
             <th>Cédula</th>
             <th>Horas/día (mín–máx)</th>
@@ -432,6 +429,38 @@
         <div class="modal-actions">
           <button class="btn-ghost" onclick="cerrarModal('modal-plantilla')">Cancelar</button>
           <button class="btn-primary" onclick="guardarPlantilla()">Guardar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="modal-editar-turno" class="modal-backdrop">
+      <div class="modal">
+        <h2 id="modal-editar-turno-titulo">Editar turno</h2>
+        <p style="color:var(--text-muted); font-size:13px; margin-top:-8px;">
+          Edición manual -- sobrescribe lo que haya en esta celda. Si el turno tenía un
+          descanso partido o varios bloques, quedan reemplazados por uno solo.
+        </p>
+        <div class="row-2">
+          <label>Hora inicio
+            <input id="editar-turno-inicio" type="number" min="0" max="23" value="11">
+          </label>
+          <label>Hora fin
+            <input id="editar-turno-fin" type="number" min="1" max="23" value="19">
+          </label>
+        </div>
+        <div class="row-2">
+          <label>Almuerzo -- inicio (opcional)
+            <input id="editar-turno-almuerzo-inicio" type="number" min="0" max="23" placeholder="sin almuerzo">
+          </label>
+          <label>Almuerzo -- horas
+            <input id="editar-turno-almuerzo-horas" type="number" min="0" max="2" step="0.5" value="0">
+          </label>
+        </div>
+        <p id="editar-turno-error" class="error-text"></p>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="btn-eliminar-turno-manual" onclick="eliminarTurnoManual()">Quitar turno (dejar libre)</button>
+          <button class="btn-ghost" onclick="cerrarModal('modal-editar-turno')">Cancelar</button>
+          <button class="btn-primary" onclick="guardarTurnoManual()">Guardar</button>
         </div>
       </div>
     </div>
@@ -1116,6 +1145,6 @@
 
 </div> <!-- /app-root -->
 
-<script src="app.js?v=4"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

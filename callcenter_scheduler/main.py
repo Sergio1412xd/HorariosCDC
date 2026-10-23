@@ -27,7 +27,7 @@ from db import DIAS_SEMANA, TIPOS_DISPONIBILIDAD, TIPOS_PERMISO
 from validar_disponibilidad import validar_todos
 from generador_horarios import (generar_horario_semana, _demanda_por_dia, _ventana_disponibilidad,
                                   HORARIO_OPERATIVO_INICIO, HORARIO_OPERATIVO_FIN, estimar_nivel_servicio_real,
-                                  recomendar_plantillas_turno)
+                                  recomendar_plantillas_turno, recalcular_desde_horario_editado)
 from costos import calcular_costo_horario
 from loader_disponibilidad import cargar_disponibilidad_excel
 from loader_llamadas import cargar_llamadas_excel
@@ -768,37 +768,67 @@ def api_actualizar_empleado(empleado_id: int, payload: EmpleadoUpdate):
 class HorasExtraRequest(BaseModel):
     permite_horas_extra: bool
     max_horas_extra_semana: float = 0
-    superadmin_username: str
-    superadmin_password: str
 
 
 @app.put("/api/empleados/{empleado_id}/horas-extra")
 def api_configurar_horas_extra(empleado_id: int, payload: HorasExtraRequest, request: Request):
-    """Habilitar/deshabilitar horas extra para un asesor. Sin importar quién esté logueado
-    haciendo el cambio (admin o superadmin), SIEMPRE exige las credenciales de un superadmin
-    escritas en el momento -- no basta con que la sesión actual ya sea de superadmin -- y
-    deja registro de la autorización (quién la pidió, quién la autorizó, y el antes/después)."""
+    """Habilitar/deshabilitar horas extra para un asesor. Cualquier usuario con acceso al
+    módulo Personal puede hacer este cambio directamente con su propia sesión -- ya NO exige
+    confirmar con credenciales de un superadmin aparte -- pero igual queda registrado en
+    Auditoría y en el historial de 'autorizaciones_horas_extra' (quién lo hizo y el antes/después)."""
     empleado = db.obtener_empleado(empleado_id)
     if not empleado:
         raise HTTPException(404, "Empleado no encontrado")
     if payload.permite_horas_extra and payload.max_horas_extra_semana <= 0:
         raise HTTPException(400, "Si activas horas extra, define cuántas (mayor que 0)")
 
-    superadmin = db.obtener_usuario_por_username(payload.superadmin_username)
-    if (not superadmin or superadmin["rol"] != "superadmin"
-            or not auth.verificar_password(payload.superadmin_password, superadmin["password_hash"], superadmin["salt"])):
-        raise HTTPException(401, "Credenciales de superadmin inválidas -- no se aplicó el cambio")
-
+    quien = request.state.user["username"]
     db.registrar_autorizacion_horas_extra(
-        empleado_id, solicitado_por=request.state.user["username"], autorizado_por=superadmin["username"],
+        empleado_id, solicitado_por=quien, autorizado_por=quien,
         permite_antes=bool(empleado["permite_horas_extra"]), permite_despues=payload.permite_horas_extra,
         horas_extra_antes=empleado["max_horas_extra_semana"],
         horas_extra_despues=payload.max_horas_extra_semana if payload.permite_horas_extra else 0,
     )
-    registrar_auditoria(request.state.user["username"], "autorizar_horas_extra",
+    registrar_auditoria(quien, "autorizar_horas_extra",
                          f"{empleado['nombre']}: {'activado' if payload.permite_horas_extra else 'desactivado'}"
-                         f" ({payload.max_horas_extra_semana}h/sem) -- autorizado por {superadmin['username']}")
+                         f" ({payload.max_horas_extra_semana}h/sem)")
     return db.obtener_empleado(empleado_id)
+
+
+class HorasExtraMasivoRequest(BaseModel):
+    empleado_ids: list[int]
+    permite_horas_extra: bool
+    max_horas_extra_semana: float = 0
+
+
+@app.put("/api/empleados/horas-extra/masivo")
+def api_configurar_horas_extra_masivo(payload: HorasExtraMasivoRequest, request: Request):
+    """Igual que el endpoint individual, pero aplicado a varios asesores de una sola vez
+    (selección múltiple en Personal) -- una fila de auditoría/autorización por cada uno, para
+    no perder el detalle de quién tenía qué antes."""
+    if not payload.empleado_ids:
+        raise HTTPException(400, "Selecciona al menos un asesor")
+    if payload.permite_horas_extra and payload.max_horas_extra_semana <= 0:
+        raise HTTPException(400, "Si activas horas extra, define cuántas (mayor que 0)")
+
+    quien = request.state.user["username"]
+    nombres = []
+    for empleado_id in payload.empleado_ids:
+        empleado = db.obtener_empleado(empleado_id)
+        if not empleado:
+            continue
+        db.registrar_autorizacion_horas_extra(
+            empleado_id, solicitado_por=quien, autorizado_por=quien,
+            permite_antes=bool(empleado["permite_horas_extra"]), permite_despues=payload.permite_horas_extra,
+            horas_extra_antes=empleado["max_horas_extra_semana"],
+            horas_extra_despues=payload.max_horas_extra_semana if payload.permite_horas_extra else 0,
+        )
+        nombres.append(empleado["nombre"])
+
+    registrar_auditoria(quien, "autorizar_horas_extra_masivo",
+                         f"{len(nombres)} asesor(es): {'activado' if payload.permite_horas_extra else 'desactivado'}"
+                         f" ({payload.max_horas_extra_semana}h/sem) -- {', '.join(nombres)}")
+    return {"ok": True, "actualizados": len(nombres)}
 
 
 @app.get("/api/autorizaciones-horas-extra")
@@ -970,6 +1000,120 @@ def api_generar_horario(fecha_lunes: str, request: Request, target_service_level
     respuesta["cumplimiento"] = cumplimiento
 
     return respuesta
+
+
+class RecalcularHorarioRequest(BaseModel):
+    fecha_lunes: str
+    horario: dict  # mismo formato que devuelve /api/horario en "horario": {nombre: {dia: {tipo, turnos|motivo}}}
+    target_service_level: float = 0.95
+    shrinkage: float = 0.10
+    factor_proyeccion: float = 1.0
+    max_occupancy: float = 0.85
+    semanas_base: Optional[str] = None
+
+
+def _reconstruir_resultado_desde_horario_editado(fecha_lunes: str, horario: dict, target_service_level: float,
+                                                  shrinkage: float, factor_proyeccion: float, max_occupancy: float,
+                                                  semanas_base: Optional[str]):
+    """Reconstruye el 'resultado' completo (cobertura, horas, alertas, costo, nivel de
+    servicio) a partir de un horario EXACTO como quedó en pantalla -- el mismo que recibe
+    guardar en Historial -- en vez de volver a correr el algoritmo de generación. La usan
+    tanto /api/horario/recalcular (edición manual de un turno) como las descargas de
+    PDF/Excel, para que lo que se descarga sea SIEMPRE idéntico a lo que la persona está
+    viendo (horario guardado del Historial, o con ediciones manuales sin guardar todavía),
+    nunca una versión regenerada de cero que puede dar números distintos."""
+    lunes = date.fromisoformat(fecha_lunes)
+    lista_semanas = semanas_base.split(",") if semanas_base else None
+    # Se vuelve a generar el horario "base" solo para recuperar la demanda real de esa
+    # semana (requeridos/calls/aht por hora) -- el horario que trae esa corrida se
+    # descarta enseguida y se reemplaza por el que está en pantalla.
+    resultado = generar_horario_semana(lunes, target_service_level=target_service_level, shrinkage=shrinkage,
+                                        factor_proyeccion=factor_proyeccion, max_occupancy=max_occupancy,
+                                        semanas_base=lista_semanas)
+
+    horario_editado = {}
+    for nombre, dias in horario.items():
+        horario_editado[nombre] = {}
+        for dia, info in dias.items():
+            if info.get("tipo") == "turno":
+                horario_editado[nombre][dia] = {"turnos": info.get("turnos") or []}
+            else:
+                horario_editado[nombre][dia] = {"motivo": info.get("motivo", "editado_manual")}
+    resultado["horario"] = horario_editado
+
+    empleados = db.listar_empleados()
+    resultado = recalcular_desde_horario_editado(resultado, empleados, fecha_lunes=lunes)
+    costo = calcular_costo_horario(resultado)
+    nivel_servicio = estimar_nivel_servicio_real(resultado)
+    return lunes, resultado, costo, nivel_servicio, empleados
+
+
+@app.post("/api/horario/recalcular")
+def api_recalcular_horario(payload: RecalcularHorarioRequest, request: Request):
+    """
+    Para la edición manual en la vista de Horarios: recibe el horario ya generado CON los
+    cambios que el usuario hizo a mano (editar/extender/borrar un turno, o añadir uno
+    donde no había), y recalcula cobertura real, horas por semana, costo, nivel de
+    servicio estimado, cumplimiento normativo y alertas a partir de esos cambios -- sin
+    volver a correr el algoritmo de asignación, para no perder la edición manual.
+    """
+    try:
+        lunes, resultado, costo, nivel_servicio, empleados = _reconstruir_resultado_desde_horario_editado(
+            payload.fecha_lunes, payload.horario, payload.target_service_level, payload.shrinkage,
+            payload.factor_proyeccion, payload.max_occupancy, payload.semanas_base)
+    except ValueError:
+        raise HTTPException(400, "fecha_lunes debe tener formato YYYY-MM-DD")
+
+    cumplimiento = validar_cumplimiento(resultado, lunes, empleados)
+    respuesta = _serializar_horario(resultado, costo, nivel_servicio)
+    respuesta["cumplimiento"] = cumplimiento
+
+    registrar_auditoria(request.state.user["username"], "editar_horario_manual", payload.fecha_lunes)
+    return respuesta
+
+
+class HorarioReporteExactoRequest(RecalcularHorarioRequest):
+    mostrar_costos: bool = True
+
+
+@app.post("/api/horario/pdf")
+def api_horario_pdf_exacto(payload: HorarioReporteExactoRequest, request: Request):
+    """Descarga el PDF del horario TAL CUAL está en pantalla (el mismo horario que vería
+    la persona, venga de una generación fresca, de un guardado del Historial, o con
+    ediciones manuales sin guardar) -- en vez del GET viejo, que siempre regeneraba el
+    horario de cero y podía dar números distintos a los que se ven en pantalla."""
+    try:
+        lunes, resultado, costo, nivel_servicio, _ = _reconstruir_resultado_desde_horario_editado(
+            payload.fecha_lunes, payload.horario, payload.target_service_level, payload.shrinkage,
+            payload.factor_proyeccion, payload.max_occupancy, payload.semanas_base)
+    except ValueError:
+        raise HTTPException(400, "fecha_lunes debe tener formato YYYY-MM-DD")
+
+    ruta = generar_pdf_horario(lunes, target_service_level=payload.target_service_level, shrinkage=payload.shrinkage,
+                                max_occupancy=payload.max_occupancy, mostrar_costos=payload.mostrar_costos,
+                                salida="reporte_horario.pdf", resultado=resultado, costo=costo,
+                                nivel_servicio=nivel_servicio)
+    sufijo = "" if payload.mostrar_costos else "_equipo"
+    return FileResponse(ruta, media_type="application/pdf", filename=f"reporte_horario_{payload.fecha_lunes}{sufijo}.pdf")
+
+
+@app.post("/api/horario/excel")
+def api_horario_excel_exacto(payload: HorarioReporteExactoRequest, request: Request):
+    """Igual que api_horario_pdf_exacto pero para el Excel -- mismo principio: el archivo
+    que se descarga refleja exactamente el horario que está en pantalla."""
+    try:
+        lunes, resultado, costo, nivel_servicio, _ = _reconstruir_resultado_desde_horario_editado(
+            payload.fecha_lunes, payload.horario, payload.target_service_level, payload.shrinkage,
+            payload.factor_proyeccion, payload.max_occupancy, payload.semanas_base)
+    except ValueError:
+        raise HTTPException(400, "fecha_lunes debe tener formato YYYY-MM-DD")
+
+    ruta = generar_excel_horario(lunes, target_service_level=payload.target_service_level, shrinkage=payload.shrinkage,
+                                  max_occupancy=payload.max_occupancy, mostrar_costos=payload.mostrar_costos,
+                                  salida="horario.xlsx", resultado=resultado, costo=costo, nivel_servicio=nivel_servicio)
+    sufijo = "" if payload.mostrar_costos else "_equipo"
+    return FileResponse(ruta, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                         filename=f"horario_{payload.fecha_lunes}{sufijo}.xlsx")
 
 
 @app.get("/api/festivos")

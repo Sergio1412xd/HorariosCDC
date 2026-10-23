@@ -38,12 +38,20 @@ MOTIVOS_TEXTO = {
 
 def generar_excel_horario(fecha_lunes: date, target_service_level: float = 0.95, shrinkage: float = 0.10,
                            max_occupancy: float = 0.85, semanas_base: list = None, mostrar_costos: bool = True,
-                           db_path: str = "callcenter.db", salida: str = "horario.xlsx") -> str:
+                           db_path: str = "callcenter.db", salida: str = "horario.xlsx",
+                           resultado: dict = None, costo: dict = None, nivel_servicio: dict = None) -> str:
+    """Si se pasan 'resultado'/'costo'/'nivel_servicio' ya calculados (horario tal cual está
+    en pantalla -- guardado del historial o con ediciones manuales), el Excel se arma con
+    esos datos sin volver a generar el horario desde cero (ver el mismo parámetro en
+    pdf_reporte.generar_pdf_horario para el porqué)."""
     empleados = listar_empleados(db_path=db_path)
-    resultado = generar_horario_semana(fecha_lunes, db_path=db_path, target_service_level=target_service_level,
-                                        shrinkage=shrinkage, max_occupancy=max_occupancy, semanas_base=semanas_base)
-    costo = calcular_costo_horario(resultado, db_path=db_path)
-    nivel_servicio = estimar_nivel_servicio_real(resultado)
+    if resultado is None:
+        resultado = generar_horario_semana(fecha_lunes, db_path=db_path, target_service_level=target_service_level,
+                                            shrinkage=shrinkage, max_occupancy=max_occupancy, semanas_base=semanas_base)
+    if costo is None:
+        costo = calcular_costo_horario(resultado, db_path=db_path)
+    if nivel_servicio is None:
+        nivel_servicio = estimar_nivel_servicio_real(resultado)
     cumplimiento = validar_cumplimiento(resultado, fecha_lunes, empleados, db_path=db_path)
     horas_trabajadas = [h for h in resultado["horas_semana"].values() if h > 0]
     promedio_horas = round(sum(horas_trabajadas) / len(horas_trabajadas), 1) if horas_trabajadas else 0
