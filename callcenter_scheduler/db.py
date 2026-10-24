@@ -79,6 +79,23 @@ class _CursorWrapper:
         return [_Row(cols, r) for r in self._cursor.fetchall()]
 
 
+import re as _re
+
+_PARAM_NOMBRADO = _re.compile(r"(?<![\w:]):([A-Za-z_]\w*)")
+
+
+def _a_posicional(sql, params):
+    """libsql (Turso) exige parámetros posicionales en lista/tupla; sqlite3 sí acepta
+    diccionarios con :nombre. Convierte :nombre -> ? y arma la tupla en el orden de uso."""
+    if isinstance(params, dict):
+        nombres = _PARAM_NOMBRADO.findall(sql)
+        sql = _PARAM_NOMBRADO.sub("?", sql)
+        return sql, tuple(params[n] for n in nombres)
+    if isinstance(params, (list, tuple)):
+        return sql, tuple(params)
+    return sql, tuple(params)
+
+
 class _TursoConnWrapper:
     """Envuelve la conexión de 'libsql' para que el resto de db.py (que usa
     conn.execute(...).fetchall()/dict(fila), como con sqlite3) no note la
@@ -88,6 +105,7 @@ class _TursoConnWrapper:
         self._conn = raw_conn
 
     def execute(self, sql, params=()):
+        sql, params = _a_posicional(sql, params)
         cur = self._conn.cursor()
         cur.execute(sql, params)
         return _CursorWrapper(cur)
@@ -96,7 +114,8 @@ class _TursoConnWrapper:
         # libsql no siempre expone executemany igual que sqlite3: se hace en bucle.
         cur = self._conn.cursor()
         for params in seq_of_params:
-            cur.execute(sql, params)
+            sql_pos, params_pos = _a_posicional(sql, params)
+            cur.execute(sql_pos, params_pos)
         return _CursorWrapper(cur)
 
     def executescript(self, script):
@@ -486,11 +505,18 @@ def insertar_llamadas_bulk(filas: list[dict], db_path: str = DB_PATH) -> dict:
     """
     with get_conn(db_path) as conn:
         antes = conn.execute("SELECT COUNT(*) c FROM llamadas").fetchone()["c"]
-        conn.executemany("""
-            INSERT OR IGNORE INTO llamadas
-                (numero, campana, fecha, hora, espera_seg, duracion_seg, agente, resultado, hash_unico)
-            VALUES (:numero, :campana, :fecha, :hora, :espera_seg, :duracion_seg, :agente, :resultado, :hash_unico)
-        """, filas)
+        cols = ("numero", "campana", "fecha", "hora", "espera_seg", "duracion_seg", "agente", "resultado", "hash_unico")
+        fila_ph = "(" + ",".join("?" * len(cols)) + ")"
+        # En bloques de 100 filas por INSERT: con Turso cada sentencia es un viaje de red,
+        # y fila por fila una carga grande tardaría minutos (y vencería el tiempo de espera).
+        for i in range(0, len(filas), 100):
+            bloque = filas[i:i + 100]
+            valores = []
+            for f in bloque:
+                valores.extend(f[c] for c in cols)
+            conn.execute(
+                f"INSERT OR IGNORE INTO llamadas ({', '.join(cols)}) VALUES " + ",".join([fila_ph] * len(bloque)),
+                valores)
         despues = conn.execute("SELECT COUNT(*) c FROM llamadas").fetchone()["c"]
     return {"insertadas_nuevas": despues - antes, "ya_existian": len(filas) - (despues - antes)}
 
