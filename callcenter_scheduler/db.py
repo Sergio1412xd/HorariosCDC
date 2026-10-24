@@ -16,6 +16,8 @@ igual que antes (archivo callcenter.db de siempre).
 import json
 import os
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
@@ -26,6 +28,16 @@ TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 # Caché local del embedded replica de Turso (se regenera solo si Render
 # reinicia el disco; los datos reales viven en Turso, no aquí).
 _TURSO_CACHE_PATH = "/tmp/turso_cache.db" if os.environ.get("RENDER") else "turso_cache.db"
+# Con Turso, FastAPI atiende varias peticiones a la vez en hilos distintos. Si dos hilos
+# abren la réplica local y sincronizan al mismo tiempo, una transacción de escritura puede
+# quedarse esperando y Turso la cancela ("stream was idle for too long" / SQLITE_BUSY).
+# Por eso todo acceso a Turso se serializa con este candado (son operaciones cortas).
+_TURSO_LOCK = threading.RLock()
+_TURSO_SYNC_CADA_SEG = 3.0   # no sincronizar con la nube en CADA llamada, solo si pasó este tiempo
+_turso_ultimo_sync = 0.0
+# Salida de emergencia sin tocar código: TURSO_REMOTO=1 en Render -> sin réplica local,
+# cada consulta va directo a Turso (más lento, pero sin caché ni sincronización).
+TURSO_REMOTO = os.environ.get("TURSO_REMOTO") == "1"
 
 
 class _Row:
@@ -103,15 +115,23 @@ class _TursoConnWrapper:
 
     def __init__(self, raw_conn):
         self._conn = raw_conn
+        self._escribio = False
+
+    @staticmethod
+    def _es_lectura(sql):
+        return sql.lstrip().upper().startswith(("SELECT", "PRAGMA TABLE_INFO", "WITH"))
 
     def execute(self, sql, params=()):
         sql, params = _a_posicional(sql, params)
+        if not self._es_lectura(sql):
+            self._escribio = True
         cur = self._conn.cursor()
         cur.execute(sql, params)
         return _CursorWrapper(cur)
 
     def executemany(self, sql, seq_of_params):
         # libsql no siempre expone executemany igual que sqlite3: se hace en bucle.
+        self._escribio = True
         cur = self._conn.cursor()
         for params in seq_of_params:
             sql_pos, params_pos = _a_posicional(sql, params)
@@ -119,12 +139,17 @@ class _TursoConnWrapper:
         return _CursorWrapper(cur)
 
     def executescript(self, script):
+        self._escribio = True
         self._conn.executescript(script)
 
     def commit(self):
+        global _turso_ultimo_sync
         self._conn.commit()
+        if not self._escribio or TURSO_REMOTO:
+            return  # una consulta de solo lectura no necesita sincronizar nada
         try:
             self._conn.sync()  # empuja los cambios locales a Turso
+            _turso_ultimo_sync = time.time()
         except Exception as e:
             print(f"[turso] aviso: no se pudo sincronizar con la nube ({e}); "
                   f"los datos quedaron guardados localmente y se reintentará "
@@ -149,19 +174,26 @@ TIPOS_PERMISO = ("vacaciones", "capacitacion", "incapacidad", "permiso_remunerad
 def get_conn(db_path: str = DB_PATH):
     if TURSO_DATABASE_URL:
         import libsql  # se instala solo si vas a usar Turso (ver requirements.txt)
-        raw = libsql.connect(_TURSO_CACHE_PATH, sync_url=TURSO_DATABASE_URL,
-                              auth_token=TURSO_AUTH_TOKEN or "")
-        try:
-            raw.sync()  # trae los datos más recientes de Turso antes de leer/escribir
-        except Exception as e:
-            print(f"[turso] aviso: no se pudo sincronizar al abrir ({e}); "
-                  f"se sigue con la caché local mientras se recupera la conexión.")
-        conn = _TursoConnWrapper(raw)
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        global _turso_ultimo_sync
+        with _TURSO_LOCK:
+            if TURSO_REMOTO:
+                raw = libsql.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN or "")
+            else:
+                raw = libsql.connect(_TURSO_CACHE_PATH, sync_url=TURSO_DATABASE_URL,
+                                      auth_token=TURSO_AUTH_TOKEN or "")
+                if time.time() - _turso_ultimo_sync > _TURSO_SYNC_CADA_SEG:
+                    try:
+                        raw.sync()  # trae los datos más recientes de Turso antes de leer/escribir
+                        _turso_ultimo_sync = time.time()
+                    except Exception as e:
+                        print(f"[turso] aviso: no se pudo sincronizar al abrir ({e}); "
+                              f"se sigue con la caché local mientras se recupera la conexión.")
+            conn = _TursoConnWrapper(raw)
+            try:
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
     else:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
